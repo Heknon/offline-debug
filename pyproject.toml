@@ -1,12 +1,12 @@
 [project]
 name = "offline-debug"
-version = "0.2.0"
+version = "0.2.1"
 description = "Debug exceptions offline by saving them to a dump and raising them at a later point."
 readme = "README.md"
 authors = [
     { name = "Itai Elidan", email = "itaielidan@gmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12, <3.14"
 dependencies = [
     "typing-extensions>=4.15.0",
 ]

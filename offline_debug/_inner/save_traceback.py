@@ -6,7 +6,7 @@ import types
 from io import BytesIO
 from pathlib import Path
 
-from offline_debug._inner.models import _ExceptionData, _FrameData
+from offline_debug._inner.models import ExceptionData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
 # We exclude these specifically because they are automatically recreated
@@ -41,9 +41,9 @@ def _filter_dict(d: dict) -> dict:
     return result
 
 
-def _serialize_exc_data(exc: BaseException) -> _ExceptionData:
+def _serialize_exc_data(exc: BaseException) -> ExceptionData:
     """Recursively serialize exception data into dataclasses."""
-    tb_frames: list[_FrameData] = []
+    tb_frames: list[FrameData] = []
     curr_tb = exc.__traceback__
     while curr_tb:
         f = curr_tb.tb_frame
@@ -58,7 +58,7 @@ def _serialize_exc_data(exc: BaseException) -> _ExceptionData:
                 mod_name = spec.name
 
         tb_frames.append(
-            _FrameData(
+            FrameData(
                 code=marshal.dumps(f.f_code),
                 globals=_filter_dict(f.f_globals),
                 locals=_filter_dict(f.f_locals),
@@ -77,7 +77,7 @@ def _serialize_exc_data(exc: BaseException) -> _ExceptionData:
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
-    return _ExceptionData(
+    return ExceptionData(
         exc_pickle=exc_pickle,
         tb_frames=tb_frames,
         cause=_serialize_exc_data(exc.__cause__) if exc.__cause__ else None,
@@ -85,9 +85,12 @@ def _serialize_exc_data(exc: BaseException) -> _ExceptionData:
     )
 
 
-def save_traceback(exc: BaseException, file: Path | BytesIO) -> None:
+def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:
     """Serialize an exception and its traceback to a file."""
     data = _serialize_exc_data(exc)
+    if file is None:
+        return data
+
     if isinstance(file, Path):
         with file.open("wb") as f:
             pickle.dump(data, f)
@@ -96,3 +99,4 @@ def save_traceback(exc: BaseException, file: Path | BytesIO) -> None:
     else:
         msg = f"Unexpected type for file {type(file).__name__}"
         raise TypeError(msg)
+    return data

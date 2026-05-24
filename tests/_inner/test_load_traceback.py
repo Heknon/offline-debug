@@ -23,16 +23,6 @@ def get_frames(tb: types.TracebackType | None) -> list[types.FrameType]:
     return frames
 
 
-def test_typing_never() -> None:
-    """Test that load_traceback is correctly annotated with Never."""
-    import typing
-
-    from offline_debug import load_traceback
-
-    load_traceback_annotations = typing.get_type_hints(load_traceback)
-    assert load_traceback_annotations["return"] is typing.Never
-
-
 def test_load_invalid_object(tmp_path: Path) -> None:
     """Test that load_traceback raises TypeError when loading an invalid object."""
     import pickle
@@ -56,9 +46,9 @@ def test_reconstruct_invalid_exception_type() -> None:
     import pickle
 
     from offline_debug._inner.load_traceback import _reconstruct_exc_data
-    from offline_debug._inner.models import _ExceptionData
+    from offline_debug._inner.models import ExceptionData
 
-    data = _ExceptionData(
+    data = ExceptionData(
         exc_pickle=pickle.dumps("not an exception"),
         tb_frames=[],
     )
@@ -71,7 +61,7 @@ def test_reconstruct_invalid_frame_type(monkeypatch) -> None:
     """Test that _reconstruct_exc_data raises TypeError when frame creation fails."""
     import offline_debug._inner.c_api._create_frame as _create_frame_module
     from offline_debug._inner.load_traceback import _reconstruct_exc_data
-    from offline_debug._inner.models import _ExceptionData, _FrameData
+    from offline_debug._inner.models import ExceptionData, FrameData
 
     # Mock _get_py_frame_new to return a function that returns something that is not a FrameType
     monkeypatch.setattr(_create_frame_module, "_get_py_frame_new", lambda: lambda *_: "not a frame")
@@ -82,10 +72,10 @@ def test_reconstruct_invalid_frame_type(monkeypatch) -> None:
     def dummy() -> None:
         pass
 
-    data = _ExceptionData(
+    data = ExceptionData(
         exc_pickle=pickle.dumps(ValueError("test")),
         tb_frames=[
-            _FrameData(
+            FrameData(
                 code=marshal.dumps(dummy.__code__),
                 globals={},
                 locals={},

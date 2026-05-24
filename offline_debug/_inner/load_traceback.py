@@ -7,19 +7,18 @@ import types
 from io import BytesIO
 from pathlib import Path
 from types import CodeType
-from typing import Never
 
 from offline_debug._inner.c_api import (
     create_frame,
     link_frame,
 )
 from offline_debug._inner.models import (
-    _ExceptionData,
-    _FrameData,
+    ExceptionData,
+    FrameData,
 )
 
 
-def _reconstruct_exc_data(data: _ExceptionData) -> BaseException:
+def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     """
     Recursively reconstruct an exception from its serialized data.
 
@@ -37,7 +36,7 @@ def _reconstruct_exc_data(data: _ExceptionData) -> BaseException:
         msg = f"Expected BaseException, but got {type(exc).__name__}"
         raise TypeError(msg)
 
-    reconstructed_frames: list[tuple[types.FrameType, _FrameData]] = []
+    reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:
         code: CodeType = marshal.loads(f_data.code)  # noqa: S302
 
@@ -92,17 +91,22 @@ def _reconstruct_exc_data(data: _ExceptionData) -> BaseException:
     return exc
 
 
-def load_traceback(file: Path | BytesIO) -> Never:
-    """Load an exception and its traceback from a file and raise it."""
+def parse_traceback(file: Path | BytesIO) -> ExceptionData:
     if isinstance(file, Path):
         with file.open("rb") as f:
             data = pickle.load(f)  # noqa: S301
     else:
         data = pickle.load(file)  # noqa: S301
 
-    if not isinstance(data, _ExceptionData):
+    if not isinstance(data, ExceptionData):
         msg = f"Expected _ExceptionData, but got {type(data).__name__}"
         raise TypeError(msg)
+    return data
+
+
+def load_traceback(file: Path | BytesIO, should_raise: bool = True) -> BaseException:  # noqa: FBT001, FBT002
+    """Load an exception and its traceback from a file and raise it."""
+    data = parse_traceback(file)
 
     exc = _reconstruct_exc_data(data)
 
@@ -126,4 +130,6 @@ def load_traceback(file: Path | BytesIO) -> Never:
         )
 
     exc = exc.with_traceback(tb_chain)
-    raise exc
+    if should_raise:
+        raise exc
+    return exc

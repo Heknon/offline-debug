@@ -7,7 +7,7 @@ from typing import Any
 
 
 @dataclass
-class _FrameData:
+class FrameData:
     """Serialized data for a single stack frame."""
 
     code: bytes
@@ -20,10 +20,10 @@ class _FrameData:
 
 
 @dataclass
-class _ExceptionData:
+class ExceptionData:
     """Serialized data for an exception and its traceback."""
 
     exc_pickle: bytes
-    tb_frames: list[_FrameData]
-    cause: _ExceptionData | None = None
-    context: _ExceptionData | None = None
+    tb_frames: list[FrameData]
+    cause: ExceptionData | None = None
+    context: ExceptionData | None = None

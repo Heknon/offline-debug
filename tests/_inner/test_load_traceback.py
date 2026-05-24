@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from offline_debug import load_traceback
+from offline_debug import load_traceback, save_traceback
 
 if TYPE_CHECKING:
     import types
@@ -88,3 +89,15 @@ def test_reconstruct_invalid_frame_type(monkeypatch) -> None:
 
     with pytest.raises(TypeError, match=r"Expected types.FrameType, but got str"):
         _reconstruct_exc_data(data)
+
+
+def test_load_traceback_should_raise_false() -> None:
+    """Test load_traceback when should_raise is False."""
+    buffer = BytesIO()
+    exc = ValueError("test_raise_false")
+    save_traceback(exc, buffer)
+    buffer.seek(0)
+
+    loaded_exc = load_traceback(buffer, should_raise=False)
+    assert isinstance(loaded_exc, ValueError)
+    assert str(loaded_exc) == "test_raise_false"

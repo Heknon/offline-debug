@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Never
 
 import pytest
 
-from offline_debug import load_traceback, save_traceback
+from offline_debug import ExceptionData, load_traceback, save_traceback
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -162,3 +162,10 @@ def test_unpicklable_exception_coverage(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unpicklable exception UnpicklableError: Unpicklable"):
         load_traceback(dump_file)
+
+
+def test_save_traceback_file_none() -> None:
+    """Test save_traceback when file is None."""
+    exc = ValueError("test")
+    data = save_traceback(exc, None)
+    assert isinstance(data, ExceptionData)

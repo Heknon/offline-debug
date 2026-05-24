@@ -40,22 +40,21 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     for f_data in data.tb_frames:
         code: CodeType = marshal.loads(f_data.code)  # noqa: S302
 
-        # In Python 3.11 and 3.12, accessing f_locals on a frame created via
+        # In Python 3.11+, accessing f_locals on a frame created via
         # PyFrame_New for optimized code (functions) causes a segmentation fault
         # because the internal 'fast' locals array is not initialized.
         # As a workaround, we create a 'non-optimized' version of the code object
         # by compiling a dummy string. This ensures the bytecode is safe
         # (no LOAD_FAST) while preserving metadata like name and filename.
-        if sys.version_info < (3, 13):
-            # A simple module-level code object never has fast locals.
-            # Since the source is empty, no optimized locals will be created.
-            # Instead, python will go to the unoptimized dictionary we set under frame_locals later.
-            unoptimized_code = compile("", code.co_filename, "exec")
-            code = unoptimized_code.replace(
-                co_name=code.co_name,
-                co_firstlineno=code.co_firstlineno,
-                co_qualname=code.co_qualname,
-            )
+        # A simple module-level code object never has fast locals.
+        # Since the source is empty, no optimized locals will be created.
+        # Instead, python will go to the unoptimized dictionary we set under frame_locals later.
+        unoptimized_code = compile("", code.co_filename, "exec")
+        code = unoptimized_code.replace(
+            co_name=code.co_name,
+            co_firstlineno=code.co_firstlineno,
+            co_qualname=code.co_qualname,
+        )
 
         # PyFrame_New returns a new reference to a PyFrameObject.
         if f_data.module_name:

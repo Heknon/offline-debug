@@ -19,6 +19,8 @@ exceptions look and feel genuine to debuggers and introspection tools.
 - `load_traceback(file: Path | BytesIO) -> Never`:
   Loads the serialized state, reconstructs the exception and its full traceback chain (including `__cause__` and `__context__`),
   and raises it.
+- `parse_traceback(file: Path | BytesIO) -> ExceptionData`:
+  Loads the serialized data and returns an `ExceptionData` object. This allows for inspecting the exception, stack frames, and variables without reconstructing the full traceback or raising the exception.
 
 ## Usage Example
 
@@ -37,6 +39,11 @@ except Exception as e:
 
 # To debug or re-examine later:
 load_traceback(Path("crash_report.dump"))
+
+# Or just inspect the data without raising:
+from offline_debug import parse_traceback
+data = parse_traceback(Path("crash_report.dump"))
+print(f"Number of frames: {len(data.tb_frames)}")
 ```
 
 ## Technical Implementation

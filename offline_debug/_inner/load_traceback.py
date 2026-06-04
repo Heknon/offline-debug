@@ -14,6 +14,7 @@ from offline_debug._inner.c_api import (
 )
 from offline_debug._inner.models import (
     ExceptionData,
+    ExceptionGroupData,
     FrameData,
 )
 
@@ -35,6 +36,14 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     if not isinstance(exc, BaseException):
         msg = f"Expected BaseException, but got {type(exc).__name__}"
         raise TypeError(msg)
+
+    if isinstance(data, ExceptionGroupData):
+        inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
+        # We must use derive to create a new ExceptionGroup with reconstructed inner exceptions.
+        # This is because the 'exceptions' attribute is read-only.
+        # BaseExceptionGroup is guaranteed to have 'derive' in Python 3.11+.
+        if hasattr(exc, "derive"):
+            exc = exc.derive(inner_excs)
 
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:

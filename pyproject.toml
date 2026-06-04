@@ -1,6 +1,6 @@
 [project]
 name = "offline-debug"
-version = "0.2.1"
+version = "0.3.0"
 description = "Debug exceptions offline by saving them to a dump and raising them at a later point."
 readme = "README.md"
 authors = [

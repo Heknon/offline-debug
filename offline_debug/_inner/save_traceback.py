@@ -6,7 +6,7 @@ import types
 from io import BytesIO
 from pathlib import Path
 
-from offline_debug._inner.models import ExceptionData, FrameData
+from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
 # We exclude these specifically because they are automatically recreated
@@ -77,12 +77,20 @@ def _serialize_exc_data(exc: BaseException) -> ExceptionData:
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
-    return ExceptionData(
-        exc_pickle=exc_pickle,
-        tb_frames=tb_frames,
-        cause=_serialize_exc_data(exc.__cause__) if exc.__cause__ else None,
-        context=_serialize_exc_data(exc.__context__) if exc.__context__ else None,
-    )
+    kwargs = {
+        "exc_pickle": exc_pickle,
+        "tb_frames": tb_frames,
+        "cause": _serialize_exc_data(exc.__cause__) if exc.__cause__ else None,
+        "context": _serialize_exc_data(exc.__context__) if exc.__context__ else None,
+    }
+
+    if isinstance(exc, BaseExceptionGroup):
+        return ExceptionGroupData(
+            **kwargs,
+            exceptions=[_serialize_exc_data(e) for e in exc.exceptions],
+        )
+
+    return ExceptionData(**kwargs)
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:

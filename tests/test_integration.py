@@ -222,3 +222,41 @@ def test_locals_visibility_in_reconstructed_frames(tmp_path: Path) -> None:
 
     assert f.f_locals.get("var_a") == "hello"
     assert f.f_locals.get("var_b") == expected_val
+
+
+def test_exception_group_stack(tmp_path: Path) -> None:
+    """Test serialization of ExceptionGroup."""
+    dump_file = tmp_path / "eg.dump"
+
+    def fail_1() -> Never:
+        msg = "Error 1"
+        raise ValueError(msg)
+
+    def fail_2() -> Never:
+        msg = "Error 2"
+        raise TypeError(msg)
+
+    try:
+        try:
+            fail_1()
+        except ValueError as e1:
+            try:
+                fail_2()
+            except TypeError as e2:
+                raise ExceptionGroup("Group error", [e1, e2]) from None
+    except ExceptionGroup as eg:
+        save_traceback(eg, dump_file)
+
+    with pytest.raises(ExceptionGroup, match="Group error") as exc_info:
+        load_traceback(dump_file)
+
+    reconstructed_eg = exc_info.value
+    expected_exceptions_count = 2
+    assert len(reconstructed_eg.exceptions) == expected_exceptions_count
+
+    e1, e2 = reconstructed_eg.exceptions
+    assert isinstance(e1, ValueError)
+    assert isinstance(e2, TypeError)
+
+    assert "fail_1" in [f.f_code.co_name for f in get_frames(e1.__traceback__)]
+    assert "fail_2" in [f.f_code.co_name for f in get_frames(e2.__traceback__)]

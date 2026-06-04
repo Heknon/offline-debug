@@ -19,7 +19,7 @@ class FrameData:
     module_name: str | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ExceptionData:
     """Serialized data for an exception and its traceback."""
 
@@ -27,3 +27,10 @@ class ExceptionData:
     tb_frames: list[FrameData]
     cause: ExceptionData | None = None
     context: ExceptionData | None = None
+
+
+@dataclass(kw_only=True)
+class ExceptionGroupData(ExceptionData):
+    """Serialized data for an ExceptionGroup."""
+
+    exceptions: list[ExceptionData]

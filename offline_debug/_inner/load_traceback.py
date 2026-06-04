@@ -37,13 +37,11 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
         msg = f"Expected BaseException, but got {type(exc).__name__}"
         raise TypeError(msg)
 
-    if isinstance(data, ExceptionGroupData):
+    if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
         inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
         # We must use derive to create a new ExceptionGroup with reconstructed inner exceptions.
-        # This is because the 'exceptions' attribute is read-only.
-        # BaseExceptionGroup is guaranteed to have 'derive' in Python 3.11+.
-        if hasattr(exc, "derive"):
-            exc = exc.derive(inner_excs)
+        # The exceptions that are inside the unpickled exc object are have incomplete data.
+        exc = exc.derive(inner_excs)
 
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:

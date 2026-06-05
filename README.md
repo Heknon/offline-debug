@@ -24,26 +24,44 @@ exceptions look and feel genuine to debuggers and introspection tools.
 
 ## Usage Example
 
-to get started, install with:  
+To get started, install with:  
 `pip install offline-debug` or `uv add offline-debug`
 
 ```python
 from pathlib import Path
-from offline_debug import save_traceback, load_traceback
+from offline_debug import save_traceback, load_traceback, parse_traceback
 
+# --- Saving an exception ---
 try:
-    # Code that might fail
     some_complex_operation()
 except Exception as e:
     save_traceback(e, Path("crash_report.dump"))
 
-# To debug or re-examine later:
+# --- Option 1: Re-raise the exception for debugging ---
+# This will look like the original crash in your debugger
 load_traceback(Path("crash_report.dump"))
 
-# Or just inspect the data without raising:
-from offline_debug import parse_traceback
+# --- Option 2: Inspect data without raising ---
 data = parse_traceback(Path("crash_report.dump"))
 print(f"Number of frames: {len(data.tb_frames)}")
+for frame in data.tb_frames:
+    print(f"File: {frame.code.co_filename}, Line: {frame.lineno}")
+```
+
+### Exception Group Support
+
+`offline-debug` has full support for `ExceptionGroup` (Python 3.11+). When you parse a saved `ExceptionGroup`, you can access its nested exceptions:
+
+```python
+from offline_debug import parse_traceback, ExceptionGroupData
+
+data = parse_traceback(Path("exception_group.dump"))
+
+if isinstance(data, ExceptionGroupData):
+    print(f"Group contains {len(data.exceptions)} sub-exceptions")
+    for sub_exc_data in data.exceptions:
+        # Each sub_exc_data is itself an ExceptionData object
+        print(f"Sub-exception frames: {len(sub_exc_data.tb_frames)}")
 ```
 
 ## Technical Implementation

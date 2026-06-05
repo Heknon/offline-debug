@@ -77,20 +77,24 @@ def _serialize_exc_data(exc: BaseException) -> ExceptionData:
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
-    kwargs = {
-        "exc_pickle": exc_pickle,
-        "tb_frames": tb_frames,
-        "cause": _serialize_exc_data(exc.__cause__) if exc.__cause__ else None,
-        "context": _serialize_exc_data(exc.__context__) if exc.__context__ else None,
-    }
+    cause = _serialize_exc_data(exc.__cause__) if exc.__cause__ else None
+    context = _serialize_exc_data(exc.__context__) if exc.__context__ else None
 
     if isinstance(exc, BaseExceptionGroup):
         return ExceptionGroupData(
-            **kwargs,
+            exc_pickle=exc_pickle,
+            tb_frames=tb_frames,
+            cause=cause,
+            context=context,
             exceptions=[_serialize_exc_data(e) for e in exc.exceptions],
         )
 
-    return ExceptionData(**kwargs)
+    return ExceptionData(
+        exc_pickle=exc_pickle,
+        tb_frames=tb_frames,
+        cause=cause,
+        context=context,
+    )
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:

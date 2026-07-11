@@ -6,6 +6,7 @@ import types
 from io import BytesIO
 from pathlib import Path
 
+from offline_debug._inner._pickle_helpers import robust_dump, robust_dumps
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
@@ -31,10 +32,14 @@ def _filter_dict(d: dict) -> dict:
         if k in _INTERNAL_ATTRIBUTES_TO_SKIP:
             continue
         try:
-            # We must verify if the value is picklable because many globals
-            # (like open file handles, database connections, or modules)
-            # cannot be saved to disk.
-            pickle.dumps(v)
+            # We must verify that the value survives a full pickle round-trip
+            # because many globals (like open file handles, database connections,
+            # or modules) cannot be saved to disk, and some values pickle but fail
+            # to unpickle (e.g. exceptions with keyword-only __init__ args). Such
+            # values would otherwise break the entire load, so we replace them with
+            # a placeholder. We use the same robust pickler that serializes these
+            # dicts so the check reflects what will actually be written.
+            pickle.loads(robust_dumps(v))  # noqa: S301
             result[k] = v
         except Exception:  # noqa: BLE001
             result[k] = f"<unpicklable {type(v).__name__}: {v!r}>"
@@ -71,9 +76,9 @@ def _serialize_exc_data(exc: BaseException) -> ExceptionData:
         curr_tb = curr_tb.tb_next
 
     try:
-        exc_pickle = pickle.dumps(exc)
+        exc_pickle = robust_dumps(exc)
     except Exception:  # noqa: BLE001
-        exc_pickle = pickle.dumps(
+        exc_pickle = robust_dumps(
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
@@ -105,9 +110,9 @@ def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> Exception
 
     if isinstance(file, Path):
         with file.open("wb") as f:
-            pickle.dump(data, f)
+            robust_dump(data, f)
     elif isinstance(file, BytesIO):
-        pickle.dump(data, file)
+        robust_dump(data, file)
     else:
         msg = f"Unexpected type for file {type(file).__name__}"
         raise TypeError(msg)

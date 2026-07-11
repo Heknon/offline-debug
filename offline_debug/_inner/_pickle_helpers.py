@@ -29,7 +29,9 @@ def reconstruct_exception(
 class RobustPickler(pickle.Pickler):
     """Pickler that reconstructs plain exceptions via ``__new__``."""
 
-    def reducer_override(self, obj: object) -> object:
+    # The inline suppression below is needed because this returns NotImplemented to
+    # fall back to default reduction, which the stdlib stub's return type omits.
+    def reducer_override(self, obj: object, /) -> object:  # ty: ignore[invalid-method-override]
         # Exclude BaseExceptionGroup: its __new__ requires (message, exceptions),
         # so the __new__ bypass fails for it, and default pickling already
         # round-trips groups correctly (they are consumed via .derive() on load).

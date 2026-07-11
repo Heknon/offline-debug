@@ -76,6 +76,75 @@ GLOBAL_TEST_VAL = "I am global"
 GLOBAL_VAR = "initial"
 
 
+class RaisesKeyboardInterruptOnLoad:
+    """Object that pickles fine but raises KeyboardInterrupt when unpickled."""
+
+    def __init__(self) -> None:
+        """Store an instance attribute so unpickling actually calls __setstate__."""
+        self.data = "payload"
+
+    def __setstate__(self, _state: dict) -> Never:
+        """Simulate an interrupt fired from a value's reconstruction."""
+        raise KeyboardInterrupt
+
+    def __repr__(self) -> str:
+        """Stable repr for the placeholder assertion."""
+        return "<RaisesKeyboardInterruptOnLoad>"
+
+
+def _raise_on_load() -> Never:
+    msg = "cannot load"
+    raise TypeError(msg)
+
+
+class LoadFailError(Exception):
+    """Exception that pickles fine but whose reconstruction fails at load time."""
+
+    def __reduce__(self) -> tuple:
+        """Reduce to a callable that raises when the pickle is loaded."""
+        return (_raise_on_load, ())
+
+
+def test_keyboard_interrupt_during_value_check(tmp_path: Path) -> None:
+    """A BaseException raised while round-trip checking a value must not abort the save."""
+    dump_file = tmp_path / "keyboard_interrupt.dump"
+
+    def fail_with_interrupting_local() -> Never:
+        _obj = RaisesKeyboardInterruptOnLoad()
+        _ = locals()["_obj"]
+        msg = "Error with interrupting local"
+        raise ValueError(msg)
+
+    try:
+        fail_with_interrupting_local()
+    except Exception as e:  # noqa: BLE001
+        save_traceback(e, dump_file)
+
+    with pytest.raises(ValueError, match="Error with interrupting local") as exc_info:
+        load_traceback(dump_file)
+
+    frames = get_frames(exc_info.tb)
+    f = next(f for f in frames if f.f_code.co_name == "fail_with_interrupting_local")
+    assert any("<unpicklable" in str(v) for v in f.f_locals.values())
+
+
+def test_exception_that_fails_only_on_load(tmp_path: Path) -> None:
+    """An exception that dumps fine but cannot be loaded must degrade to RuntimeError."""
+    dump_file = tmp_path / "load_fail_exc.dump"
+
+    def raise_load_fail() -> Never:
+        msg = "Load fail"
+        raise LoadFailError(msg)
+
+    try:
+        raise_load_fail()
+    except Exception as e:  # noqa: BLE001
+        save_traceback(e, dump_file)
+
+    with pytest.raises(RuntimeError, match="Unpicklable exception LoadFailError: Load fail"):
+        load_traceback(dump_file)
+
+
 def test_global_variables_in_stack(tmp_path: Path) -> None:
     """Test that global variables are preserved in the stack."""
     dump_file = tmp_path / "globals.dump"

@@ -22,7 +22,11 @@ repos:
 
       - id: pytest-coverage
         name: pytest-coverage
-        entry: uv run pytest --cov=offline_debug --cov-report=term --cov-fail-under=100
+        entry: >
+          bash -c '
+          UV_PROJECT_ENVIRONMENT=.venv-3.12 uv run --python 3.12 pytest --cov=offline_debug &&
+          UV_PROJECT_ENVIRONMENT=.venv-3.13 uv run --python 3.13 pytest --cov=offline_debug --cov-append --cov-report=term --cov-fail-under=100
+          '
         language: system
         types: [python]
         pass_filenames: false

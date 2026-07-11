@@ -1,32 +1,89 @@
 """
-Robust pickling for exceptions that vanilla pickle cannot reconstruct.
+Pickling for exceptions that vanilla pickle cannot reconstruct.
 
 ``BaseException`` reduces to ``(type(self), self.args, state)``, so pickle
 rebuilds an exception by calling ``Cls(*self.args)`` and then applying state.
-Exceptions whose ``__init__`` takes required keyword-only arguments (and which
-do not populate ``self.args`` via ``super().__init__``) pickle fine but fail on
-load with a ``TypeError``. Since a traceback-capture library must serialize
-whatever the user raised, we take over reconstruction and rebuild such
-exceptions via ``__new__``, bypassing ``__init__`` entirely.
+Exceptions whose ``__init__``/``__new__`` takes required keyword-only arguments
+(and which do not populate ``self.args`` via ``super().__init__``) pickle fine
+but fail on load with a ``TypeError``. Since a traceback-capture library must
+serialize whatever the user raised, we take over reconstruction for such
+exceptions.
 
-Exception groups are handled separately: ``BaseExceptionGroup`` stores its
-``message``/``exceptions`` through ``__new__`` (not a settable ``args``), and
-subclasses may override ``__new__``/``__init__`` with required keyword-only
-arguments. We reconstruct them via ``BaseExceptionGroup.__new__``, bypassing any
-subclass constructor, then restore instance state.
+We keep the takeover as narrow as possible so well-behaved exceptions keep
+their vanilla pickle behavior:
+
+- Classes that customize the pickle protocol (``__reduce__``, ``__setstate__``,
+  ...) are left alone; their hooks know how to rebuild them (e.g. ``OSError``).
+- Classes whose constructors are all C-level (every builtin exception) are left
+  alone; ``Cls(*args)`` is guaranteed to work and restores C-level state such
+  as ``StopIteration.value`` that lives outside ``__dict__``.
+- Only classes with a Python-defined ``__init__``/``__new__`` — the only kind
+  that can demand required keyword-only arguments — are reconstructed by us,
+  and even then reconstruction first retries normal construction and only
+  falls back to ``__new__`` (bypassing the constructor) when it fails.
+
+Exception groups get a dedicated reconstructor because a bare
+``cls.__new__(cls)`` is not enough for them: ``BaseExceptionGroup.__new__``
+requires ``message``/``exceptions`` to build a valid group for any subclass.
+
+.. warning::
+    The path of this module and the names of :func:`reconstruct_exception` and
+    :func:`reconstruct_exception_group` are embedded in every dump that takes
+    the takeover path. Renaming or moving them makes previously saved dumps
+    unloadable, so treat them as part of the on-disk format.
 """
 
+import contextlib
 import io
 import pickle
+import types
 from typing import IO, Any
+
+# Pickle protocol hooks that let a class control its own serialization.
+# If an exception class customizes any of these, we must not override its
+# reduction: the class (e.g. OSError, ImportError) knows how to rebuild itself.
+_PICKLE_PROTOCOL_HOOKS = (
+    "__reduce_ex__",
+    "__reduce__",
+    "__getstate__",
+    "__setstate__",
+    "__getnewargs__",
+    "__getnewargs_ex__",
+)
+
+
+def _customizes_pickling(cls: type[BaseException]) -> bool:
+    """Whether ``cls`` overrides any pickle protocol hook of ``BaseException``."""
+    return any(
+        getattr(cls, hook, None) is not getattr(BaseException, hook, None)
+        for hook in _PICKLE_PROTOCOL_HOOKS
+    )
+
+
+def _has_python_constructor(cls: type[BaseException]) -> bool:
+    """
+    Whether ``cls`` has a Python-defined ``__init__`` or ``__new__``.
+
+    Builtin exceptions expose C slot wrappers here, and for them default pickle
+    reconstruction always works. Only a Python-level constructor can introduce
+    required keyword-only arguments that break ``Cls(*args)`` at load time.
+    """
+    return isinstance(cls.__init__, types.FunctionType) or isinstance(
+        cls.__new__, types.FunctionType
+    )
 
 
 def reconstruct_exception(
     cls: type[BaseException], args: tuple[Any, ...], state: dict[str, Any] | None
 ) -> BaseException:
-    """Rebuild an exception without invoking its ``__init__``."""
-    exc = cls.__new__(cls)
-    exc.args = args
+    """Rebuild an exception, bypassing its constructor only if it rejects ``args``."""
+    try:
+        exc = cls(*args)
+    except Exception:  # noqa: BLE001 - a rejecting constructor is exactly the case we handle
+        exc = BaseException.__new__(cls)
+        # Suppressed failures happen when e.g. `args` is shadowed by a read-only property.
+        with contextlib.suppress(Exception):
+            exc.args = args
     if state:
         exc.__dict__.update(state)
     return exc
@@ -39,47 +96,49 @@ def reconstruct_exception_group(
     state: dict[str, Any] | None,
 ) -> BaseExceptionGroup[Any]:
     """
-    Rebuild an exception group without invoking any subclass constructor.
+    Rebuild an exception group, bypassing its constructor only when necessary.
 
     ``BaseExceptionGroup.__new__`` establishes ``message``/``exceptions`` for any
-    subclass, so we call it directly and bypass a subclass ``__new__``/``__init__``
-    that may demand extra required (keyword-only) arguments.
+    subclass, so when normal construction fails (e.g. a subclass demanding extra
+    required keyword-only arguments) we call it directly.
     """
-    exc = BaseExceptionGroup.__new__(cls, message, exceptions)
+    try:
+        exc = cls(message, exceptions)
+    except Exception:  # noqa: BLE001 - a rejecting constructor is exactly the case we handle
+        exc = BaseExceptionGroup.__new__(cls, message, exceptions)
     if state:
         exc.__dict__.update(state)
     return exc
 
 
-class RobustPickler(pickle.Pickler):
-    """Pickler that reconstructs exceptions (and groups) bypassing ``__init__``."""
+class CustomExceptionPickler(pickle.Pickler):
+    """Pickler that takes over reconstruction of constructor-rejecting exceptions."""
 
     # The inline suppression below is needed because this returns NotImplemented to
     # fall back to default reduction, which the stdlib stub's return type omits.
     def reducer_override(self, obj: object, /) -> object:  # ty: ignore[invalid-method-override]
-        # Groups must be checked first: they are also BaseExceptions, but their
-        # message/exceptions live behind __new__ rather than a settable `args`.
+        if not isinstance(obj, BaseException):
+            return NotImplemented
+        cls = type(obj)
+        if _customizes_pickling(cls) or not _has_python_constructor(cls):
+            # Default reduction is guaranteed to round-trip; taking over would
+            # lose state the class restores itself (e.g. OSError.errno).
+            return NotImplemented
+        state = obj.__dict__.copy() or None
+        # Groups need their dedicated reconstructor: message/exceptions live
+        # behind __new__ rather than a settable `args`.
         if isinstance(obj, BaseExceptionGroup):
-            state = obj.__dict__.copy() if obj.__dict__ else None
-            return reconstruct_exception_group, (
-                type(obj),
-                obj.message,
-                obj.exceptions,
-                state,
-            )
-        if isinstance(obj, BaseException):
-            state = obj.__dict__.copy() if obj.__dict__ else None
-            return reconstruct_exception, (type(obj), obj.args, state)
-        return NotImplemented
+            return reconstruct_exception_group, (cls, obj.message, obj.exceptions, state)
+        return reconstruct_exception, (cls, obj.args, state)
 
 
-def robust_dumps(obj: object) -> bytes:
-    """Serialize ``obj`` to bytes using :class:`RobustPickler`."""
+def exception_safe_dump(obj: object, file: IO[bytes]) -> None:
+    """Serialize ``obj`` to an open binary ``file`` using :class:`CustomExceptionPickler`."""
+    CustomExceptionPickler(file).dump(obj)
+
+
+def exception_safe_dumps(obj: object) -> bytes:
+    """Serialize ``obj`` to bytes using :class:`CustomExceptionPickler`."""
     buf = io.BytesIO()
-    RobustPickler(buf).dump(obj)
+    exception_safe_dump(obj, buf)
     return buf.getvalue()
-
-
-def robust_dump(obj: object, file: IO[bytes]) -> None:
-    """Serialize ``obj`` to an open binary ``file`` using :class:`RobustPickler`."""
-    RobustPickler(file).dump(obj)

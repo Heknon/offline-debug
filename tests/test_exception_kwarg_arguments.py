@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, Never, Self
+from typing import Never, Self
 
 from offline_debug import load_traceback, save_traceback
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 EXPECTED_CODE = 42
 
@@ -35,17 +32,13 @@ class KwargGroup(ExceptionGroup):
     def __init__(self, message: str, exceptions: list[Exception], *, code: int) -> None:
         """Accept ``code`` so construction does not fall through to BaseException."""
 
-    def derive(self, excs: Sequence[Exception], /) -> KwargGroup:
-        """Preserve ``code`` when the group is re-derived during reconstruction."""
-        return KwargGroup(self.message, list(excs), code=self.code)
-
 
 def test_exception_kwargs_arguments() -> None:
     """
     A keyword-only exception should round-trip and reconstruct faithfully.
 
     Such an exception pickles but cannot be rebuilt by calling ``Cls(*self.args)``
-    (its ``args`` is empty and ``message`` is required), so it exercises the robust
+    (its ``args`` is empty and ``message`` is required), so it exercises the
     pickler that reconstructs exceptions via ``__new__``.
     """
 
@@ -71,8 +64,8 @@ def test_exception_group_kwargs_arguments() -> None:
     Default pickling reduces a group to ``(Cls, (message, exceptions), state)`` and
     rebuilds by calling ``Cls(message, exceptions)``, which fails when the subclass
     requires an extra keyword-only argument. Reconstruction must go through
-    ``BaseExceptionGroup.__new__`` and restore the custom ``code`` state so that the
-    group (and its ``derive``-based reconstruction) survives the round-trip.
+    ``BaseExceptionGroup.__new__`` and restore the custom ``code`` state — without
+    requiring the subclass to override ``derive``.
     """
 
     def raise_kwarg_group() -> Never:

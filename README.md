@@ -71,7 +71,7 @@ if isinstance(data, ExceptionGroupData):
 - **Python 3.13 Compatibility**: Leverages PEP 667 features where `f_locals` is a write-through proxy, allowing for accurate local
   variable restoration.
 - **Support python 3.12 as well**
-- **Robust Serialization**:
+- **Resilient Serialization**:
     - `pickle` is used for exceptions and variables.
     - `marshal` is used for code objects.
     - Non-picklable items are gracefully handled by storing their `repr`.

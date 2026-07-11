@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from types import CodeType
 
+from offline_debug._inner._pickle_helpers import reconstruct_exception_group
 from offline_debug._inner.c_api import (
     create_frame,
     link_frame,
@@ -39,9 +40,13 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
 
     if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
         inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
-        # We must use derive to create a new ExceptionGroup with reconstructed inner exceptions.
-        # The exceptions that are inside the unpickled exc object are have incomplete data.
-        exc = exc.derive(inner_excs)
+        # The exceptions inside the unpickled exc object have incomplete data, so
+        # rebuild the group around the fully reconstructed ones. We must not use
+        # derive() for this: its default implementation returns a plain
+        # ExceptionGroup, dropping the subclass type and its custom state.
+        exc = reconstruct_exception_group(
+            type(exc), exc.message, tuple(inner_excs), exc.__dict__.copy() or None
+        )
 
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:

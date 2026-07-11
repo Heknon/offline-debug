@@ -8,6 +8,12 @@ do not populate ``self.args`` via ``super().__init__``) pickle fine but fail on
 load with a ``TypeError``. Since a traceback-capture library must serialize
 whatever the user raised, we take over reconstruction and rebuild such
 exceptions via ``__new__``, bypassing ``__init__`` entirely.
+
+Exception groups are handled separately: ``BaseExceptionGroup`` stores its
+``message``/``exceptions`` through ``__new__`` (not a settable ``args``), and
+subclasses may override ``__new__``/``__init__`` with required keyword-only
+arguments. We reconstruct them via ``BaseExceptionGroup.__new__``, bypassing any
+subclass constructor, then restore instance state.
 """
 
 import io
@@ -26,16 +32,42 @@ def reconstruct_exception(
     return exc
 
 
+def reconstruct_exception_group(
+    cls: type[BaseExceptionGroup[Any]],
+    message: str,
+    exceptions: tuple[BaseException, ...],
+    state: dict[str, Any] | None,
+) -> BaseExceptionGroup[Any]:
+    """
+    Rebuild an exception group without invoking any subclass constructor.
+
+    ``BaseExceptionGroup.__new__`` establishes ``message``/``exceptions`` for any
+    subclass, so we call it directly and bypass a subclass ``__new__``/``__init__``
+    that may demand extra required (keyword-only) arguments.
+    """
+    exc = BaseExceptionGroup.__new__(cls, message, exceptions)
+    if state:
+        exc.__dict__.update(state)
+    return exc
+
+
 class RobustPickler(pickle.Pickler):
-    """Pickler that reconstructs plain exceptions via ``__new__``."""
+    """Pickler that reconstructs exceptions (and groups) bypassing ``__init__``."""
 
     # The inline suppression below is needed because this returns NotImplemented to
     # fall back to default reduction, which the stdlib stub's return type omits.
     def reducer_override(self, obj: object, /) -> object:  # ty: ignore[invalid-method-override]
-        # Exclude BaseExceptionGroup: its __new__ requires (message, exceptions),
-        # so the __new__ bypass fails for it, and default pickling already
-        # round-trips groups correctly (they are consumed via .derive() on load).
-        if isinstance(obj, BaseException) and not isinstance(obj, BaseExceptionGroup):
+        # Groups must be checked first: they are also BaseExceptions, but their
+        # message/exceptions live behind __new__ rather than a settable `args`.
+        if isinstance(obj, BaseExceptionGroup):
+            state = obj.__dict__.copy() if obj.__dict__ else None
+            return reconstruct_exception_group, (
+                type(obj),
+                obj.message,
+                obj.exceptions,
+                state,
+            )
+        if isinstance(obj, BaseException):
             state = obj.__dict__.copy() if obj.__dict__ else None
             return reconstruct_exception, (type(obj), obj.args, state)
         return NotImplemented

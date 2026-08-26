@@ -19,6 +19,11 @@ from offline_debug._inner.models import (
     FrameData,
 )
 
+# Sentinel ``tb_lasti`` meaning "no bytecode offset applies to this frame".
+# ``traceback._get_code_position`` returns no position for a negative offset, which
+# makes the stdlib fall back to ``tb_lineno`` instead of indexing ``co_positions()``.
+_NO_INSTRUCTION_OFFSET = -1
+
 
 def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
     """
@@ -72,7 +77,18 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
         tb_next = types.TracebackType(
             tb_next=tb_next,
             tb_frame=frame,
-            tb_lasti=f_data.lasti,
+            # The original ``lasti`` indexes into the original bytecode, but the frame
+            # above deliberately carries a synthetic (empty) code object, so the two do
+            # not correspond. Handing the real ``lasti`` to the stdlib makes
+            # ``traceback._get_code_position`` walk ``co_positions()`` of a two-entry
+            # code object looking for instruction ``lasti // 2``, which raises
+            # StopIteration inside a generator -- surfacing as ``RuntimeError: generator
+            # raised StopIteration`` from any attempt to format the exception.
+            #
+            # A negative ``lasti`` is the stdlib's own signal for "no instruction
+            # position available": it then falls back to ``tb_lineno``, which we restore
+            # accurately. ``FrameData.lasti`` stays in the dump as original metadata.
+            tb_lasti=_NO_INSTRUCTION_OFFSET,
             tb_lineno=f_data.lineno,
         )
     return tb_next

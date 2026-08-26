@@ -99,6 +99,10 @@ payload = [
 
 - **True Frame Reconstruction**: Uses `ctypes` to call `PyFrame_New` from the Python C API. This creates real `frame` objects
   which are required for a valid `types.TracebackType`.
+- **Line-level Position Fidelity**: Reconstructed frames carry a synthetic code object (real optimized
+  bytecode would segfault on `f_locals` access), so they report no bytecode offset and the stdlib resolves
+  positions from the restored line numbers. Tracebacks print with correct files, lines and functions; the
+  `^^^^` column markers are not available for reconstructed frames.
 - **Python 3.13 Compatibility**: Leverages PEP 667 features where `f_locals` is a write-through proxy, allowing for accurate local
   variable restoration.
 - **Support python 3.12 as well**

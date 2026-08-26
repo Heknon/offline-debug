@@ -137,7 +137,7 @@ def _build_exception(data: ExceptionData, built: dict[int, BaseException]) -> Ba
         except KeyError:
             # Only reachable from a hand-crafted dump: a group that (transitively)
             # contains itself cannot be built, since its members must exist first.
-            msg = "Cannot reconstruct an exception group that contains itself"
+            msg = "Cannot reconstruct an exception group that transitively contains itself"
             raise ValueError(msg) from None
         # The exceptions inside the unpickled exc object have incomplete data, so
         # rebuild the group around the fully reconstructed ones. We must not use
@@ -157,9 +157,10 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     ``save_traceback`` records the exception graph as-is, so ``cause``/``context`` may
     revisit a node or point back at it (``raise e from e``). Reconstruction therefore
     runs in two passes: first every exception is built, then the ``__cause__``/
-    ``__context__`` links are wired up from the identity map. Doing the links second is
-    what lets a cycle be restored as a genuine cycle instead of an endless chain of
-    copies, and it keeps a node that is reachable twice a single shared object.
+    ``__context__`` links and ``__suppress_context__`` are restored from the identity
+    map. Doing the links second is what lets a cycle be restored as a genuine cycle
+    instead of an endless chain of copies, and it keeps a node that is reachable twice a
+    single shared object.
     """
     nodes = _collect_nodes(data)
 
@@ -173,6 +174,11 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
             exc.__cause__ = built[id(node.cause)]
         if node.context is not None:
             exc.__context__ = built[id(node.context)]
+        # Assigning ``__cause__`` sets ``__suppress_context__`` as a side effect, so the
+        # saved value must be restored *after* the links -- and unconditionally, since
+        # ``raise X from None`` outside an ``except`` block suppresses a context that is
+        # itself ``None``, leaving no assignment to piggyback on.
+        exc.__suppress_context__ = node.suppress_context
 
     return built[id(data)]
 

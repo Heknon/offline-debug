@@ -17,9 +17,12 @@ the saved graph mirrors the original one.
 from __future__ import annotations
 
 import json
+import pickle
 import sys
 from io import BytesIO
 from typing import TYPE_CHECKING
+
+import pytest
 
 from offline_debug import (
     ExceptionData,
@@ -309,3 +312,49 @@ def test_walk_is_not_recursion_bound() -> None:
         sys.setrecursionlimit(original_limit)
 
     assert count == DEEP_CHAIN_LINKS + 1
+
+
+def test_group_containing_itself_is_rejected() -> None:
+    """
+    A group that contains itself cannot be rebuilt, and must say so.
+
+    ``save_traceback`` cannot produce this shape -- a real ``BaseExceptionGroup``
+    cannot hold itself -- but a hand-crafted or corrupted dump can. Members must
+    exist before the group is built, so a self-membership edge has no valid build
+    order and is reported rather than surfacing as a bare ``KeyError``.
+    """
+    group = ExceptionGroupData(
+        exc_pickle=pickle.dumps(ExceptionGroup("group", [ValueError("a")])),
+        tb_frames=[],
+        exceptions=[],
+    )
+    group.exceptions.append(group)
+
+    buffer = BytesIO()
+    pickle.dump(group, buffer)
+    buffer.seek(0)
+
+    with pytest.raises(ValueError, match="contains itself"):
+        load_traceback(buffer, should_raise=False)
+
+
+def test_mutually_containing_groups_are_rejected() -> None:
+    """Two groups holding each other have no valid build order either."""
+    outer_group = ExceptionGroupData(
+        exc_pickle=pickle.dumps(ExceptionGroup("outer", [ValueError("a")])),
+        tb_frames=[],
+        exceptions=[],
+    )
+    inner_group = ExceptionGroupData(
+        exc_pickle=pickle.dumps(ExceptionGroup("inner", [ValueError("b")])),
+        tb_frames=[],
+        exceptions=[outer_group],
+    )
+    outer_group.exceptions.append(inner_group)
+
+    buffer = BytesIO()
+    pickle.dump(outer_group, buffer)
+    buffer.seek(0)
+
+    with pytest.raises(ValueError, match="contains itself"):
+        load_traceback(buffer, should_raise=False)

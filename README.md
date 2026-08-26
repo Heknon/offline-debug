@@ -95,6 +95,17 @@ payload = [
 ]
 ```
 
+### Dump Compatibility
+
+The on-disk layout has not changed, so dumps written by earlier versions load, raise and print
+normally — and they gain the traceback-formatting fix, having previously failed to format at
+all. What they do not gain is the deduplication: a pre-0.4.0 dump stored a separate copy of
+every shared exception, and that duplication is part of the file. Re-save to shrink it.
+
+New dumps are readable by 0.4.0 and later. An older release can still read a new dump of an
+ordinary exception, but not one whose graph genuinely contains a cycle (`raise e from e`): the
+pre-0.4.0 reader follows `__cause__` forever and dies with a `RecursionError`.
+
 ## Technical Implementation
 
 - **True Frame Reconstruction**: Uses `ctypes` to call `PyFrame_New` from the Python C API. This creates real `frame` objects

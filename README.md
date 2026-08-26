@@ -64,6 +64,37 @@ if isinstance(data, ExceptionGroupData):
         print(f"Sub-exception frames: {len(sub_exc_data.tb_frames)}")
 ```
 
+### Cyclic and Shared Exception Graphs
+
+`__cause__`/`__context__` form a directed graph, not a tree. `raise X from Y` sets **both**
+`X.__cause__` and `X.__context__` to `Y`, and `raise e from e` makes an exception its own cause,
+so a saved graph may share nodes or contain cycles. `offline-debug` records that graph faithfully:
+each exception is saved exactly once, and a cycle round-trips as a real cycle.
+
+This means consumers must not walk `cause`/`context` naively — a recursive walk will not terminate,
+and `dataclasses.asdict()` / `json.dumps()` fail outright on a cycle. Use `walk_exception_data`,
+which visits each node exactly once and never recurses:
+
+```python
+from offline_debug import parse_traceback, walk_exception_data
+
+data = parse_traceback(Path("crash_report.dump"))
+
+# Stable ids let you emit references instead of nesting - this is what makes a
+# cyclic graph representable in JSON.
+ids = {id(node): i for i, node in enumerate(walk_exception_data(data))}
+
+payload = [
+    {
+        "id": ids[id(node)],
+        "frames": len(node.tb_frames),
+        "cause_id": ids[id(node.cause)] if node.cause else None,
+        "context_id": ids[id(node.context)] if node.context else None,
+    }
+    for node in walk_exception_data(data)
+]
+```
+
 ## Technical Implementation
 
 - **True Frame Reconstruction**: Uses `ctypes` to call `PyFrame_New` from the Python C API. This creates real `frame` objects

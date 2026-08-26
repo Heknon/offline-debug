@@ -16,11 +16,19 @@ the saved graph mirrors the original one.
 
 from __future__ import annotations
 
+import json
 import sys
 from io import BytesIO
 from typing import TYPE_CHECKING
 
-from offline_debug import ExceptionData, load_traceback, parse_traceback, save_traceback
+from offline_debug import (
+    ExceptionData,
+    ExceptionGroupData,
+    load_traceback,
+    parse_traceback,
+    save_traceback,
+    walk_exception_data,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -221,3 +229,83 @@ def test_exception_group_member_pointing_back_at_group() -> None:
 
     assert isinstance(restored, ExceptionGroup)
     assert restored.exceptions[0].__cause__ is restored
+
+
+def test_walk_visits_every_node_exactly_once() -> None:
+    """The public traversal terminates on a cycle and yields each node once."""
+    buffer = BytesIO()
+    save_traceback(self_caused(), buffer)
+    buffer.seek(0)
+    data = parse_traceback(buffer)
+    assert data.cause is data
+
+    visited = list(walk_exception_data(data))
+
+    assert visited == [data]
+
+
+def test_walk_covers_causes_contexts_and_group_members() -> None:
+    """Every reachable node is reported, including exception group members."""
+    try:
+        msg = "inner"
+        raise ValueError(msg)
+    except ValueError as inner:
+        try:
+            raise ExceptionGroup("group", [inner, TypeError("other")])
+        except ExceptionGroup as group:
+            original = group
+
+    buffer = BytesIO()
+    save_traceback(original, buffer)
+    buffer.seek(0)
+    data = parse_traceback(buffer)
+
+    visited = list(walk_exception_data(data))
+    assert data in visited
+    assert len({id(node) for node in visited}) == len(visited)
+    assert isinstance(data, ExceptionGroupData)
+    for member in data.exceptions:
+        assert any(node is member for node in visited)
+
+
+def test_walk_enables_a_json_safe_projection() -> None:
+    """A cyclic graph can be projected to JSON as ids and references."""
+    buffer = BytesIO()
+    save_traceback(self_caused(), buffer)
+    buffer.seek(0)
+    data = parse_traceback(buffer)
+
+    ids = {id(node): i for i, node in enumerate(walk_exception_data(data))}
+    payload = [
+        {
+            "id": ids[id(node)],
+            "cause_id": ids[id(node.cause)] if node.cause is not None else None,
+        }
+        for node in walk_exception_data(data)
+    ]
+
+    # The self-cause survives as a reference rather than defeating serialization.
+    assert json.loads(json.dumps(payload)) == [{"id": 0, "cause_id": 0}]
+
+
+def test_walk_is_not_recursion_bound() -> None:
+    """Walking a long chain must not exhaust the interpreter stack."""
+    deepest: BaseException = ValueError("root")
+    for i in range(DEEP_CHAIN_LINKS):
+        nxt = RuntimeError(f"lvl{i}")
+        nxt.__cause__ = deepest
+        deepest = nxt
+
+    buffer = BytesIO()
+    save_traceback(deepest, buffer)
+    buffer.seek(0)
+    data = parse_traceback(buffer)
+
+    original_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(200)
+    try:
+        count = sum(1 for _ in walk_exception_data(data))
+    finally:
+        sys.setrecursionlimit(original_limit)
+
+    assert count == DEEP_CHAIN_LINKS + 1

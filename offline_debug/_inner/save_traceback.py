@@ -112,8 +112,17 @@ def _build_exc_node(exc: BaseException, roundtrip_cache: dict[int, str | None]) 
     tb_frames = _serialize_frames(exc, roundtrip_cache)
 
     if isinstance(exc, BaseExceptionGroup):
-        return ExceptionGroupData(exc_pickle=exc_pickle, tb_frames=tb_frames, exceptions=[])
-    return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
+        return ExceptionGroupData(
+            exc_pickle=exc_pickle,
+            tb_frames=tb_frames,
+            suppress_context=exc.__suppress_context__,
+            exceptions=[],
+        )
+    return ExceptionData(
+        exc_pickle=exc_pickle,
+        tb_frames=tb_frames,
+        suppress_context=exc.__suppress_context__,
+    )
 
 
 def _serialize_exc_data(

@@ -30,6 +30,10 @@ class ExceptionData:
     tb_frames: list[FrameData]
     cause: ExceptionData | None = None
     context: ExceptionData | None = None
+    # Whether the original exception had its context suppressed (``raise X from None``).
+    # Defaulted so that a dump written before this field existed reads as ``False``:
+    # dataclass defaults live on the class, so the missing key resolves there.
+    suppress_context: bool = False
 
 
 @dataclass(kw_only=True)

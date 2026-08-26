@@ -16,10 +16,12 @@ to ``tb_lineno``, which is restored accurately.
 
 from __future__ import annotations
 
+import pickle
 import traceback
 from io import BytesIO
+from typing import Never
 
-from offline_debug import load_traceback, save_traceback
+from offline_debug import ExceptionData, load_traceback, save_traceback
 
 
 def roundtrip(exc: BaseException) -> BaseException:
@@ -145,3 +147,99 @@ def test_exception_group_can_be_formatted() -> None:
     assert "ExceptionGroup: group (2 sub-exceptions)" in text
     assert "ValueError: x" in text
     assert "TypeError: y" in text
+
+
+def test_suppressed_context_stays_suppressed() -> None:
+    """``raise X from None`` must not print the context its author suppressed."""
+
+    def raise_suppressing() -> Never:
+        try:
+            msg = "internal detail"
+            raise KeyError(msg)
+        except KeyError:
+            msg = "public message"
+            raise ValueError(msg) from None
+
+    try:
+        raise_suppressing()
+    except ValueError as err:
+        original = err
+
+    restored = roundtrip(original)
+
+    assert restored.__suppress_context__ is True
+    assert "internal detail" not in formatted(restored)
+    assert "During handling of the above exception" not in formatted(restored)
+
+
+def test_implicit_context_is_still_shown() -> None:
+    """Restoring suppression must not suppress an ordinary implicit context."""
+
+    def raise_implicitly() -> Never:
+        try:
+            msg = "first failure"
+            raise KeyError(msg)
+        except KeyError:
+            msg = "second failure"
+            raise ValueError(msg)  # noqa: B904 - the implicit context is the point
+
+    try:
+        raise_implicitly()
+    except ValueError as err:
+        original = err
+
+    restored = roundtrip(original)
+
+    assert restored.__suppress_context__ is False
+    assert "first failure" in formatted(restored)
+    assert "During handling of the above exception" in formatted(restored)
+
+
+def test_explicit_cause_keeps_suppression_flag() -> None:
+    """``raise X from Y`` suppresses the context while still showing the cause."""
+
+    def raise_from_cause() -> Never:
+        try:
+            msg = "root cause"
+            raise KeyError(msg)
+        except KeyError as err:
+            msg = "wrapper"
+            raise ValueError(msg) from err
+
+    try:
+        raise_from_cause()
+    except ValueError as err:
+        original = err
+
+    restored = roundtrip(original)
+
+    assert restored.__suppress_context__ is True
+    assert "direct cause" in formatted(restored)
+
+
+def test_suppression_survives_without_any_context() -> None:
+    """``raise X from None`` outside an ``except`` block has no link to piggyback on."""
+    original = ValueError("standalone")
+    original.__suppress_context__ = True
+
+    restored = roundtrip(original)
+
+    assert restored.__cause__ is None
+    assert restored.__context__ is None
+    assert restored.__suppress_context__ is True
+
+
+def test_dump_without_suppression_field_still_loads() -> None:
+    """A pre-0.4.0 dump has no ``suppress_context`` key and must default to False."""
+    data = ExceptionData(exc_pickle=pickle.dumps(ValueError("old")), tb_frames=[])
+    # Reproduce the on-disk shape of a dump written before the field existed.
+    del data.__dict__["suppress_context"]
+    assert "suppress_context" not in data.__dict__
+
+    buffer = BytesIO()
+    pickle.dump(data, buffer)
+    buffer.seek(0)
+    restored = load_traceback(buffer, should_raise=False)
+
+    assert isinstance(restored, ValueError)
+    assert restored.__suppress_context__ is False

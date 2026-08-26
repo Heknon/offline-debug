@@ -97,14 +97,20 @@ payload = [
 
 ### Dump Compatibility
 
-The on-disk layout has not changed, so dumps written by earlier versions load, raise and print
-normally — and they gain the traceback-formatting fix, having previously failed to format at
-all. What they do not gain is the deduplication: a pre-0.4.0 dump stored a separate copy of
-every shared exception, and that duplication is part of the file. Re-save to shrink it.
+The on-disk layout gained one optional field in 0.4.0 (`suppress_context`, defaulting to
+`False`); nothing was removed or renamed. Dumps written by earlier versions load, raise and
+print normally, and they gain the traceback-formatting fix, having previously failed to format
+at all.
+
+What an old dump cannot gain is anything the writer never recorded: it stored a separate copy
+of every shared exception, and no `suppress_context` at all. So it still expands to more nodes
+than a fresh save, and a `raise X from None` in it still prints the context its author
+suppressed. Re-saving under 0.4.0 fixes both.
 
 New dumps are readable by 0.4.0 and later. An older release can still read a new dump of an
-ordinary exception, but not one whose graph genuinely contains a cycle (`raise e from e`): the
-pre-0.4.0 reader follows `__cause__` forever and dies with a `RecursionError`.
+ordinary exception — it ignores the added field, so suppression is simply not restored — but
+not one whose graph genuinely contains a cycle (`raise e from e`): the pre-0.4.0 reader follows
+`__cause__` forever and dies with a `RecursionError`.
 
 ## Technical Implementation
 

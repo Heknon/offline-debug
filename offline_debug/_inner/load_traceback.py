@@ -20,9 +20,9 @@ from offline_debug._inner.models import (
 )
 
 
-def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
     """
-    Recursively reconstruct an exception from its serialized data.
+    Rebuild the traceback of a single exception from its serialized frames.
 
     Note on Python Locals:
     Python uses two ways to store local variables:
@@ -33,21 +33,6 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     During reconstruction, we must explicitly synchronize these because PyFrame_New
     does not automatically populate the "fast" locals array from a dictionary.
     """
-    exc: BaseException = pickle.loads(data.exc_pickle)  # noqa: S301
-    if not isinstance(exc, BaseException):
-        msg = f"Expected BaseException, but got {type(exc).__name__}"
-        raise TypeError(msg)
-
-    if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
-        inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
-        # The exceptions inside the unpickled exc object have incomplete data, so
-        # rebuild the group around the fully reconstructed ones. We must not use
-        # derive() for this: its default implementation returns a plain
-        # ExceptionGroup, dropping the subclass type and its custom state.
-        exc = reconstruct_exception_group(
-            type(exc), exc.message, tuple(inner_excs), exc.__dict__.copy() or None
-        )
-
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:
         code: CodeType = marshal.loads(f_data.code)  # noqa: S302
@@ -84,22 +69,96 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
 
     tb_next: types.TracebackType | None = None
     for frame, f_data in reversed(reconstructed_frames):
-        tb = types.TracebackType(
+        tb_next = types.TracebackType(
             tb_next=tb_next,
             tb_frame=frame,
             tb_lasti=f_data.lasti,
             tb_lineno=f_data.lineno,
         )
-        tb_next = tb
+    return tb_next
 
-    exc = exc.with_traceback(tb_next)
 
-    if data.cause:
-        exc.__cause__ = _reconstruct_exc_data(data.cause)
-    if data.context:
-        exc.__context__ = _reconstruct_exc_data(data.context)
+def _collect_nodes(root: ExceptionData) -> list[ExceptionData]:
+    """
+    List every node reachable from ``root``, sub-exceptions always before their group.
 
-    return exc
+    A group can only be rebuilt once its members exist, whereas ``cause``/``context`` are
+    assigned after the fact, so ``exceptions`` is the only edge that constrains build
+    order. The walk is iterative and identity-memoized because the graph may contain
+    cycles (see :func:`_reconstruct_exc_data`).
+    """
+    seen: set[int] = set()
+    order: list[ExceptionData] = []
+    stack: list[tuple[ExceptionData, bool]] = [(root, False)]
+
+    while stack:
+        node, children_done = stack.pop()
+        if children_done:
+            order.append(node)
+            continue
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        # Re-push the node below its children so it is emitted after them.
+        stack.append((node, True))
+        if isinstance(node, ExceptionGroupData):
+            stack.extend((sub, False) for sub in node.exceptions)
+        stack.extend((link, False) for link in (node.cause, node.context) if link is not None)
+
+    return order
+
+
+def _build_exception(data: ExceptionData, built: dict[int, BaseException]) -> BaseException:
+    """Rebuild one exception with its traceback, taking sub-exceptions from ``built``."""
+    exc: BaseException = pickle.loads(data.exc_pickle)  # noqa: S301
+    if not isinstance(exc, BaseException):
+        msg = f"Expected BaseException, but got {type(exc).__name__}"
+        raise TypeError(msg)
+
+    if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
+        try:
+            inner_excs = [built[id(sub)] for sub in data.exceptions]
+        except KeyError:
+            # Only reachable from a hand-crafted dump: a group that (transitively)
+            # contains itself cannot be built, since its members must exist first.
+            msg = "Cannot reconstruct an exception group that contains itself"
+            raise ValueError(msg) from None
+        # The exceptions inside the unpickled exc object have incomplete data, so
+        # rebuild the group around the fully reconstructed ones. We must not use
+        # derive() for this: its default implementation returns a plain
+        # ExceptionGroup, dropping the subclass type and its custom state.
+        exc = reconstruct_exception_group(
+            type(exc), exc.message, tuple(inner_excs), exc.__dict__.copy() or None
+        )
+
+    return exc.with_traceback(_reconstruct_frames(data))
+
+
+def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+    """
+    Reconstruct an exception graph, restoring shared and cyclic references.
+
+    ``save_traceback`` records the exception graph as-is, so ``cause``/``context`` may
+    revisit a node or point back at it (``raise e from e``). Reconstruction therefore
+    runs in two passes: first every exception is built, then the ``__cause__``/
+    ``__context__`` links are wired up from the identity map. Doing the links second is
+    what lets a cycle be restored as a genuine cycle instead of an endless chain of
+    copies, and it keeps a node that is reachable twice a single shared object.
+    """
+    nodes = _collect_nodes(data)
+
+    built: dict[int, BaseException] = {}
+    for node in nodes:
+        built[id(node)] = _build_exception(node, built)
+
+    for node in nodes:
+        exc = built[id(node)]
+        if node.cause is not None:
+            exc.__cause__ = built[id(node.cause)]
+        if node.context is not None:
+            exc.__context__ = built[id(node.context)]
+
+    return built[id(data)]
 
 
 def parse_traceback(file: Path | BytesIO) -> ExceptionData:

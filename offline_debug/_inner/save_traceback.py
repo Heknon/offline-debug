@@ -58,10 +58,10 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
     return result
 
 
-def _serialize_exc_data(
+def _serialize_frames(
     exc: BaseException, roundtrip_cache: dict[int, str | None]
-) -> ExceptionData:
-    """Recursively serialize exception data into dataclasses."""
+) -> list[FrameData]:
+    """Serialize every frame of ``exc``'s own traceback."""
     tb_frames: list[FrameData] = []
     curr_tb = exc.__traceback__
     while curr_tb:
@@ -88,7 +88,11 @@ def _serialize_exc_data(
             )
         )
         curr_tb = curr_tb.tb_next
+    return tb_frames
 
+
+def _pickle_exception(exc: BaseException) -> bytes:
+    """Pickle ``exc`` itself, falling back to a placeholder if it cannot round-trip."""
     try:
         exc_pickle = exception_safe_dumps(exc)
         # A dump that cannot be loaded later is worse than a placeholder, so also
@@ -99,25 +103,62 @@ def _serialize_exc_data(
         exc_pickle = exception_safe_dumps(
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
+    return exc_pickle
 
-    cause = _serialize_exc_data(exc.__cause__, roundtrip_cache) if exc.__cause__ else None
-    context = _serialize_exc_data(exc.__context__, roundtrip_cache) if exc.__context__ else None
+
+def _build_exc_node(exc: BaseException, roundtrip_cache: dict[int, str | None]) -> ExceptionData:
+    """Build the node for a single exception, without following its links."""
+    exc_pickle = _pickle_exception(exc)
+    tb_frames = _serialize_frames(exc, roundtrip_cache)
 
     if isinstance(exc, BaseExceptionGroup):
-        return ExceptionGroupData(
-            exc_pickle=exc_pickle,
-            tb_frames=tb_frames,
-            cause=cause,
-            context=context,
-            exceptions=[_serialize_exc_data(e, roundtrip_cache) for e in exc.exceptions],
-        )
+        return ExceptionGroupData(exc_pickle=exc_pickle, tb_frames=tb_frames, exceptions=[])
+    return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
 
-    return ExceptionData(
-        exc_pickle=exc_pickle,
-        tb_frames=tb_frames,
-        cause=cause,
-        context=context,
-    )
+
+def _serialize_exc_data(
+    exc: BaseException, roundtrip_cache: dict[int, str | None]
+) -> ExceptionData:
+    """
+    Serialize an exception graph, preserving shared and cyclic references.
+
+    ``__cause__``/``__context__`` are not guaranteed to form a tree: ``raise e from e``
+    makes an exception its own cause, and the links can equally form longer cycles or
+    simply revisit the same exception twice. Walking them recursively therefore either
+    never terminates or re-serializes the same exception over and over, so we walk the
+    graph iteratively and memoize each exception by identity.
+
+    Memoizing does more than break cycles: because every exception is serialized exactly
+    once, the resulting node graph mirrors the original one (a cycle stays a cycle, and an
+    exception reachable as both cause and context stays a single shared node). ``pickle``
+    reproduces that sharing faithfully on load.
+
+    Keying the memo on ``id()`` is safe because every exception we visit is reachable from
+    ``exc`` through strong ``__cause__``/``__context__``/``exceptions`` references, so none
+    of them can be collected (and have its id reused) while the walk is in progress.
+    """
+    memo: dict[int, ExceptionData] = {}
+    pending: list[BaseException] = []
+
+    def node_for(e: BaseException) -> ExceptionData:
+        node = memo.get(id(e))
+        if node is None:
+            node = memo[id(e)] = _build_exc_node(e, roundtrip_cache)
+            pending.append(e)
+        return node
+
+    root = node_for(exc)
+    while pending:
+        curr = pending.pop()
+        node = memo[id(curr)]
+        if curr.__cause__ is not None:
+            node.cause = node_for(curr.__cause__)
+        if curr.__context__ is not None:
+            node.context = node_for(curr.__context__)
+        if isinstance(curr, BaseExceptionGroup) and isinstance(node, ExceptionGroupData):
+            node.exceptions = [node_for(sub) for sub in curr.exceptions]
+
+    return root
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:

@@ -38,6 +38,7 @@ ignore = [
     "PLW0603", # Using the global statement
     "TRY003", # Avoid specifying long messages outside the exception class
     "EM101", # Exception must not use a string literal
+    "TRY301", # Abstract raise to an inner function - tests must raise inline to build real tracebacks
 ]
 
 [build-system]

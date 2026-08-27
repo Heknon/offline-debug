@@ -26,6 +26,9 @@ ignore = [
     "D212", # Multi-line docstring summary should start at the first line
     "COM812", # Trailing comma missing
     "PLC0415", # import should be at top of file
+    "CPY001", # Missing copyright notice - licensing lives in the root LICENSE file,
+              # not in a per-file header. Reached `select = ["ALL"]` when the rule
+              # left preview, so it fails builds on any ruff new enough to ship it.
 ]
 
 [tool.ruff.lint.per-file-ignores]

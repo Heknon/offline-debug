@@ -95,10 +95,11 @@ ipython_config.py
 #Pipfile.lock
 
 # UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-uv.lock
+#   uv.lock IS tracked. The runtime dependency surface is tiny, but the dev toolchain
+#   is not: `select = ["ALL"]` adopts every rule a new ruff ships, so an unpinned
+#   linter turns a routine release into a red build with no source change. Locking
+#   makes toolchain upgrades an explicit commit instead of a surprise.
+#uv.lock
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.

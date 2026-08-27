@@ -19,11 +19,11 @@ jobs:
           enable-cache: true
           python-version: "3.12"
       - name: Ruff Format Check
-        run: uv run ruff format --check .
+        run: uv run --locked ruff format --check .
       - name: Ruff Lint Check
-        run: uv run ruff check .
+        run: uv run --locked ruff check .
       - name: Type Check with Ty
-        run: uv run ty check .
+        run: uv run --locked ty check .
 
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
@@ -41,7 +41,7 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - name: Run tests with Pytest and 100% Coverage
-        run: uv run python -m pytest --cov=offline_debug --cov-report=term-missing --cov-fail-under=100
+        run: uv run --locked python -m pytest --cov=offline_debug --cov-report=term-missing --cov-fail-under=100
 
   build:
     name: Build Check

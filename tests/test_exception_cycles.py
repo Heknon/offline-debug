@@ -17,9 +17,12 @@ the saved graph mirrors the original one.
 from __future__ import annotations
 
 import json
+import pickle
 import sys
 from io import BytesIO
 from typing import TYPE_CHECKING
+
+import pytest
 
 from offline_debug import (
     ExceptionData,
@@ -229,6 +232,29 @@ def test_exception_group_member_pointing_back_at_group() -> None:
 
     assert isinstance(restored, ExceptionGroup)
     assert restored.exceptions[0].__cause__ is restored
+
+
+def test_self_containing_group_is_rejected() -> None:
+    """
+    A hand-crafted group listed among its own members is refused, not looped on.
+
+    ``save_traceback`` cannot emit this shape, but a dump is just a pickle and can be
+    edited. The members of a group have to exist before the group is rebuilt around
+    them, so a group that (transitively) contains itself has no build order at all.
+    """
+    data = ExceptionGroupData(
+        exc_pickle=pickle.dumps(ExceptionGroup("group", [ValueError("inner")])),
+        tb_frames=[],
+        exceptions=[],
+    )
+    data.exceptions.append(data)
+
+    buffer = BytesIO()
+    pickle.dump(data, buffer)
+    buffer.seek(0)
+
+    with pytest.raises(ValueError, match="contains itself"):
+        load_traceback(buffer, should_raise=False)
 
 
 def test_walk_visits_every_node_exactly_once() -> None:

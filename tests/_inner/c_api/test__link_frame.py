@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from offline_debug._inner.c_api import create_frame
 from offline_debug._inner.c_api._link_frame import _get_f_back_offset
 
 if TYPE_CHECKING:
@@ -85,28 +86,34 @@ def test_get_f_back_offset_discovery_failure() -> None:
 
 
 def test_get_f_back_offset_wrong_offset_restoration() -> None:
-    """Test that it restores 0 if the offset was wrong."""
+    """A candidate slot that holds 0 but is not ``f_back`` must be restored to 0."""
     import offline_debug._inner.c_api._create_frame as _create_frame_module
     import offline_debug._inner.c_api._link_frame as _link_frame_module
 
-    tstate = ctypes.pythonapi.PyThreadState_Get()
-    code = compile("pass", "<dummy>", "exec")
-    frame = ctypes.pythonapi.PyFrame_New(tstate, code, {}, {})
+    # Build the frame through the package's own helper rather than calling
+    # ``ctypes.pythonapi.PyFrame_New`` directly. That function pointer is cached and
+    # process-global, and only carries argtypes/restype once ``_get_py_frame_new`` has
+    # configured it -- so calling it raw passed only when some earlier test in the same
+    # process happened to run first, and failed with ``ctypes.ArgumentError`` whenever
+    # this test ran alone, under ``-k``, or under ``--lf``.
+    frame = create_frame(code=compile("pass", "<dummy>", "exec"), frame_globals={}, frame_locals={})
 
     ptr_size = ctypes.sizeof(ctypes.c_void_p)
-    # Force the loop to check an offset that is 0 but NOT the real f_back.
+    # An arbitrary slot that is 0 but is not f_back, forcing the scan to reject it.
+    probe_offset = ptr_size * 10
+    # The probe writes raw memory, so assert the object is actually big enough rather
+    # than trusting a frame layout that differs by version and platform.
+    assert probe_offset + ptr_size <= sys.getsizeof(frame)
 
-    # Let's try this:
     with (
         patch.object(_create_frame_module, "_get_py_frame_new", return_value=lambda *_: frame),
-        patch.object(_link_frame_module, "range", return_value=[ptr_size * 10]),
-    ):  # Offset 80
-        # Ensure offset 80 is 0
-        ctypes.c_ssize_t.from_address(id(frame) + ptr_size * 10).value = 0
+        patch.object(_link_frame_module, "range", return_value=[probe_offset]),
+    ):
+        ctypes.c_ssize_t.from_address(id(frame) + probe_offset).value = 0
         offset = _get_f_back_offset()
         assert offset is None
-        # Verify it was restored to 0
-        assert ctypes.c_ssize_t.from_address(id(frame) + ptr_size * 10).value == 0
+        # The scan must put the slot back so the frame's refcounts stay sane.
+        assert ctypes.c_ssize_t.from_address(id(frame) + probe_offset).value == 0
 
 
 def test_get_f_back_offset_ctypes_error() -> None:

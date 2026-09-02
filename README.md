@@ -72,8 +72,11 @@ so a saved graph may share nodes or contain cycles. `offline-debug` records that
 each exception is saved exactly once, and a cycle round-trips as a real cycle.
 
 This means consumers must not walk `cause`/`context` naively — a recursive walk will not terminate,
-and `dataclasses.asdict()` / `json.dumps()` fail outright on a cycle. Use `walk_exception_data`,
-which visits each node exactly once and never recurses:
+and `dataclasses.asdict()` / `json.dumps()` fail outright on a cycle. For the same reason the data
+nodes compare and hash by identity rather than by value (a structural `==` would recurse through
+the cycle forever), so two dumps of the same exception are never equal; `id()` — or the node itself,
+as a dict key or set member — is the stable handle. Use `walk_exception_data`, which visits each
+node exactly once and never recurses:
 
 ```python
 from offline_debug import parse_traceback, walk_exception_data

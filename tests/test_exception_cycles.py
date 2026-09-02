@@ -25,6 +25,7 @@ from typing import Never
 import pytest
 
 from offline_debug import (
+    ExceptionData,
     ExceptionGroupData,
     load_traceback,
     parse_traceback,
@@ -447,3 +448,27 @@ def test_mutually_containing_groups_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="contains itself"):
         load_traceback(buffer, should_raise=False)
+
+
+def test_nodes_compare_by_identity() -> None:
+    """
+    Nodes must compare by identity, since structural equality cannot end on a cycle.
+
+    A dataclass-generated ``__eq__`` compares fields recursively, so comparing two
+    parses of a ``raise e from e`` dump would recurse through ``cause`` forever.
+    """
+
+    def parsed() -> ExceptionData:
+        buffer = BytesIO()
+        save_traceback(self_caused(), buffer)
+        buffer.seek(0)
+        return parse_traceback(buffer)
+
+    first, second = parsed(), parsed()
+    assert first.cause is first
+
+    assert first == first  # noqa: PLR0124 - identity is the semantics under test
+    assert first != second
+    by_node = {first: "first", second: "second"}
+    assert by_node[first] == "first"
+    assert by_node[second] == "second"

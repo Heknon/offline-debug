@@ -22,9 +22,16 @@ class FrameData:
     module_name: str | None = None
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, eq=False)
 class ExceptionData:
-    """Serialized data for an exception and its traceback."""
+    """
+    Serialized data for an exception and its traceback.
+
+    Nodes compare and hash by identity, like the exceptions they describe: the saved
+    graph may contain cycles (``raise e from e``), on which a structural ``__eq__`` would
+    recurse forever. Two dumps of the same exception therefore never compare equal;
+    ``id()`` (or the node itself, as a dict key or set member) is the stable handle.
+    """
 
     exc_pickle: bytes
     tb_frames: list[FrameData]
@@ -36,7 +43,7 @@ class ExceptionData:
     suppress_context: bool = False
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, eq=False)
 class ExceptionGroupData(ExceptionData):
     """Serialized data for an ExceptionGroup."""
 

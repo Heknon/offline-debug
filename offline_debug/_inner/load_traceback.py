@@ -20,9 +20,16 @@ from offline_debug._inner.models import (
 )
 
 
-def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+def _build_exception(data: ExceptionData, memo: dict[int, BaseException]) -> BaseException:
     """
-    Recursively reconstruct an exception from its serialized data.
+    Reconstruct one exception with its traceback, but without cause/context links.
+
+    Group members are rebuilt first because ``BaseExceptionGroup.__new__`` needs
+    them; the ``exceptions`` edges alone always form a tree, since a group's
+    members are fixed at construction and so can never include the group itself.
+    Cause/context edges can point anywhere in the graph (including back at a
+    group from one of its members), so :func:`_reconstruct_exc_data` links them
+    only once every node exists.
 
     Note on Python Locals:
     Python uses two ways to store local variables:
@@ -33,13 +40,16 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     During reconstruction, we must explicitly synchronize these because PyFrame_New
     does not automatically populate the "fast" locals array from a dictionary.
     """
+    if id(data) in memo:
+        return memo[id(data)]
+
     exc: BaseException = pickle.loads(data.exc_pickle)  # noqa: S301
     if not isinstance(exc, BaseException):
         msg = f"Expected BaseException, but got {type(exc).__name__}"
         raise TypeError(msg)
 
     if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
-        inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
+        inner_excs = [_build_exception(e, memo) for e in data.exceptions]
         # The exceptions inside the unpickled exc object have incomplete data, so
         # rebuild the group around the fully reconstructed ones. We must not use
         # derive() for this: its default implementation returns a plain
@@ -93,13 +103,50 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
         tb_next = tb
 
     exc = exc.with_traceback(tb_next)
-
-    if data.cause:
-        exc.__cause__ = _reconstruct_exc_data(data.cause)
-    if data.context:
-        exc.__context__ = _reconstruct_exc_data(data.context)
-
+    memo[id(data)] = exc
     return exc
+
+
+def _collect_exc_data(root: ExceptionData) -> list[ExceptionData]:
+    """Return every ``ExceptionData`` node reachable from ``root``, each exactly once."""
+    seen: dict[int, ExceptionData] = {}
+    pending = [root]
+    while pending:
+        data = pending.pop()
+        if id(data) in seen:
+            continue
+        seen[id(data)] = data
+        if data.cause is not None:
+            pending.append(data.cause)
+        if data.context is not None:
+            pending.append(data.context)
+        if isinstance(data, ExceptionGroupData):
+            pending.extend(data.exceptions)
+    return list(seen.values())
+
+
+def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+    """
+    Reconstruct the whole exception graph stored in ``data``.
+
+    Mirrors the save side: every node is rebuilt exactly once (O(n)), and the
+    cause/context links are wired afterwards from a memo keyed on the node, so
+    an exception that was shared (or cyclic) in the original graph is shared
+    again in the reconstructed one rather than duplicated.
+    """
+    memo: dict[int, BaseException] = {}
+    nodes = _collect_exc_data(data)
+    for node in nodes:
+        _build_exception(node, memo)
+
+    for node in nodes:
+        exc = memo[id(node)]
+        if node.cause is not None:
+            exc.__cause__ = memo[id(node.cause)]
+        if node.context is not None:
+            exc.__context__ = memo[id(node.context)]
+
+    return memo[id(data)]
 
 
 def parse_traceback(file: Path | BytesIO) -> ExceptionData:

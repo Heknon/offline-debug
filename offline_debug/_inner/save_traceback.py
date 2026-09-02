@@ -3,6 +3,7 @@
 import marshal
 import pickle
 import types
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
 
@@ -58,10 +59,17 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
     return result
 
 
-def _serialize_exc_data(
+def _serialize_exc_node(
     exc: BaseException, roundtrip_cache: dict[int, str | None]
 ) -> ExceptionData:
-    """Recursively serialize exception data into dataclasses."""
+    """
+    Serialize a single exception and its traceback frames.
+
+    The node is returned unlinked: ``cause``/``context`` are ``None`` and a group's
+    ``exceptions`` list is empty. :func:`_serialize_exc_data` fills those in once
+    every node of the graph exists, which is what lets shared and cyclic
+    references be represented without re-serializing anything.
+    """
     tb_frames: list[FrameData] = []
     curr_tb = exc.__traceback__
     while curr_tb:
@@ -100,24 +108,58 @@ def _serialize_exc_data(
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
-    cause = _serialize_exc_data(exc.__cause__, roundtrip_cache) if exc.__cause__ else None
-    context = _serialize_exc_data(exc.__context__, roundtrip_cache) if exc.__context__ else None
-
     if isinstance(exc, BaseExceptionGroup):
-        return ExceptionGroupData(
-            exc_pickle=exc_pickle,
-            tb_frames=tb_frames,
-            cause=cause,
-            context=context,
-            exceptions=[_serialize_exc_data(e, roundtrip_cache) for e in exc.exceptions],
-        )
+        return ExceptionGroupData(exc_pickle=exc_pickle, tb_frames=tb_frames, exceptions=[])
+    return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
 
-    return ExceptionData(
-        exc_pickle=exc_pickle,
-        tb_frames=tb_frames,
-        cause=cause,
-        context=context,
-    )
+
+def _neighbours(exc: BaseException) -> Iterator[BaseException]:
+    """Yield the exceptions ``exc`` links to: its cause, its context and group members."""
+    if exc.__cause__ is not None:
+        yield exc.__cause__
+    if exc.__context__ is not None:
+        yield exc.__context__
+    if isinstance(exc, BaseExceptionGroup):
+        yield from exc.exceptions
+
+
+def _serialize_exc_data(
+    exc: BaseException, roundtrip_cache: dict[int, str | None]
+) -> ExceptionData:
+    """
+    Serialize the whole exception graph reachable from ``exc`` into dataclasses.
+
+    ``__cause__``, ``__context__`` and ``ExceptionGroup.exceptions`` form a graph,
+    not a tree: ``raise X from Y`` inside ``except Y`` points both the cause and
+    the context of ``X`` at the same ``Y`` (so a naive recursive walk doubles its
+    work at every link of a chain), and manual assignment can even create cycles
+    (``raise e from e``). The graph is therefore walked iteratively with a memo
+    keyed on ``id(exc)`` so every exception is serialized exactly once, in O(n)
+    time and memory, and links are resolved afterwards against the memo. The
+    resulting ``ExceptionData`` graph mirrors the original object identity, which
+    ``pickle`` preserves on disk and :func:`load_traceback` restores.
+
+    The memo holds the exception objects themselves so their ids cannot be
+    recycled while the walk is in progress.
+    """
+    memo: dict[int, tuple[BaseException, ExceptionData]] = {}
+    pending: list[BaseException] = [exc]
+    while pending:
+        curr = pending.pop()
+        if id(curr) in memo:
+            continue
+        memo[id(curr)] = (curr, _serialize_exc_node(curr, roundtrip_cache))
+        pending.extend(_neighbours(curr))
+
+    for curr, data in memo.values():
+        if curr.__cause__ is not None:
+            data.cause = memo[id(curr.__cause__)][1]
+        if curr.__context__ is not None:
+            data.context = memo[id(curr.__context__)][1]
+        if isinstance(curr, BaseExceptionGroup) and isinstance(data, ExceptionGroupData):
+            data.exceptions = [memo[id(e)][1] for e in curr.exceptions]
+
+    return memo[id(exc)][1]
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:

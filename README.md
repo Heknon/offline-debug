@@ -71,6 +71,9 @@ if isinstance(data, ExceptionGroupData):
 - **Python 3.13 Compatibility**: Leverages PEP 667 features where `f_locals` is a write-through proxy, allowing for accurate local
   variable restoration.
 - **Support python 3.12 as well**
+- **Exception Graph Traversal**: `__cause__`, `__context__` and `ExceptionGroup.exceptions` are walked as a graph, not a
+  tree. Every exception is serialized exactly once (O(n) time and memory), shared references keep their identity after
+  loading, and cycles such as `raise e from e` round-trip safely.
 - **Resilient Serialization**:
     - `pickle` is used for exceptions and variables.
     - `marshal` is used for code objects.

@@ -98,22 +98,35 @@ def test_get_f_back_offset_wrong_offset_restoration() -> None:
     # this test ran alone, under ``-k``, or under ``--lf``.
     frame = create_frame(code=compile("pass", "<dummy>", "exec"), frame_globals={}, frame_locals={})
 
+    f_back_offset = _get_f_back_offset()
+    assert f_back_offset is not None
+    _get_f_back_offset.cache_clear()
+
     ptr_size = ctypes.sizeof(ctypes.c_void_p)
-    # An arbitrary slot that is 0 but is not f_back, forcing the scan to reject it.
-    probe_offset = ptr_size * 10
-    # The probe writes raw memory, so assert the object is actually big enough rather
-    # than trusting a frame layout that differs by version and platform.
-    assert probe_offset + ptr_size <= sys.getsizeof(frame)
+    object_header_size = 2 * ptr_size  # refcount + type pointer
+    # The scan writes raw memory, so the probe must be a slot that genuinely holds 0 --
+    # a NULL pointer such as ``f_trace`` -- rather than a live field zeroed for the
+    # occasion, and it must lie inside the object's fixed part (``__basicsize__``;
+    # ``sys.getsizeof`` would also count the GC header that precedes the object). The
+    # frame layout differs by version and platform, so find such a slot instead of
+    # assuming one.
+    body = range(object_header_size, type(frame).__basicsize__ - ptr_size + 1, ptr_size)
+    probe_offset = next(
+        candidate
+        for candidate in body
+        if candidate != f_back_offset
+        and ctypes.c_ssize_t.from_address(id(frame) + candidate).value == 0
+    )
 
     with (
         patch.object(_create_frame_module, "_get_py_frame_new", return_value=lambda *_: frame),
         patch.object(_link_frame_module, "range", return_value=[probe_offset]),
     ):
-        ctypes.c_ssize_t.from_address(id(frame) + probe_offset).value = 0
         offset = _get_f_back_offset()
-        assert offset is None
-        # The scan must put the slot back so the frame's refcounts stay sane.
-        assert ctypes.c_ssize_t.from_address(id(frame) + probe_offset).value == 0
+
+    assert offset is None
+    # The scan must put the slot back so the frame's refcounts stay sane.
+    assert ctypes.c_ssize_t.from_address(id(frame) + probe_offset).value == 0
 
 
 def test_get_f_back_offset_ctypes_error() -> None:

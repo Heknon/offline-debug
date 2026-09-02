@@ -19,79 +19,11 @@ from offline_debug._inner.models import (
     ExceptionGroupData,
     FrameData,
 )
-
-# Instruction offset every reconstructed traceback entry points at. The synthetic code
-# object built in ``_reconstruct_frames`` maps *all* of its instructions to the restored
-# position, so any offset would resolve to the same one; the first is always valid.
-_SYNTHETIC_LASTI = 0
-
-# ``co_linetable`` encoding (``Objects/locations.md`` in CPython): a sequence of entries,
-# each a header byte ``0b1_CCCC_LLL`` -- location code ``CCCC`` covering ``LLL + 1`` code
-# units -- followed by code-specific varints. Code 13 is "line only, no columns", followed
-# by one signed varint holding the line delta from the previous entry, which for the
-# first entry is relative to ``co_firstlineno``. Code 14 is the long form: the same line
-# delta, then the end line as an unsigned delta from that line, then the start and end
-# columns, each stored plus one so that zero can mean "no column". Varints carry 6
-# payload bits per byte, least significant first, with bit 6 set on every byte but the
-# last; signed values put the sign in the low bit and the magnitude above it.
-_ENTRY_HEADER_FLAG = 0x80
-_NO_COLUMNS_LOCATION_CODE = 13
-_LONG_LOCATION_CODE = 14
-_MAX_UNITS_PER_ENTRY = 8
-_CODE_UNIT_SIZE = 2
-_VARINT_PAYLOAD_BITS = 6
-_VARINT_PAYLOAD_MASK = (1 << _VARINT_PAYLOAD_BITS) - 1
-_VARINT_CONTINUATION_FLAG = 1 << _VARINT_PAYLOAD_BITS
+from offline_debug._inner.self_check import ensure_supported
+from offline_debug._inner.synthetic_code import CODE_UNIT_SIZE, Position, synthetic_code
 
 
-def _varint(value: int) -> bytes:
-    """Encode an unsigned integer as a location table varint."""
-    encoded = bytearray()
-    while value > _VARINT_PAYLOAD_MASK:
-        encoded.append(_VARINT_CONTINUATION_FLAG | (value & _VARINT_PAYLOAD_MASK))
-        value >>= _VARINT_PAYLOAD_BITS
-    encoded.append(value)
-    return bytes(encoded)
-
-
-def _signed_varint(value: int) -> bytes:
-    """Encode a signed integer as a location table varint."""
-    return _varint(((-value) << 1) | 1 if value < 0 else value << 1)
-
-
-# A source position as ``co_positions()`` reports it: start line, end line, and the
-# start and end columns, which are ``None`` when the code carries no column information.
-_Position = tuple[int, int, int | None, int | None]
-
-
-def _location_table(code: CodeType, firstlineno: int, position: _Position) -> bytes:
-    """
-    Build a ``co_linetable`` placing every instruction of ``code`` at ``position``.
-
-    ``firstlineno`` is the ``co_firstlineno`` the table will be paired with, since the
-    first entry's line is stored relative to it. A position without columns produces
-    line-only entries; one with columns produces long-form entries, which is what lets
-    the traceback printers draw ``^^^^`` markers under the failing expression.
-    """
-    lineno, end_lineno, col, end_col = position
-    units = len(code.co_code) // _CODE_UNIT_SIZE
-    delta = lineno - firstlineno
-    table = bytearray()
-    while units > 0:
-        run = min(units, _MAX_UNITS_PER_ENTRY)
-        if col is None or end_col is None:
-            table.append(_ENTRY_HEADER_FLAG | (_NO_COLUMNS_LOCATION_CODE << 3) | (run - 1))
-            table += _signed_varint(delta)
-        else:
-            table.append(_ENTRY_HEADER_FLAG | (_LONG_LOCATION_CODE << 3) | (run - 1))
-            table += _signed_varint(delta)
-            table += _varint(end_lineno - lineno) + _varint(col + 1) + _varint(end_col + 1)
-        delta = 0
-        units -= run
-    return bytes(table)
-
-
-def _original_position(code: CodeType, f_data: FrameData) -> _Position:
+def _original_position(code: CodeType, f_data: FrameData) -> Position:
     """
     Return the source position of the instruction the original traceback entry pointed at.
 
@@ -102,10 +34,10 @@ def _original_position(code: CodeType, f_data: FrameData) -> _Position:
     offset, an instruction without column information (for example under
     ``-X no_debug_ranges``), or a position that disagrees with the recorded line.
     """
-    line_only: _Position = (f_data.lineno, f_data.lineno, None, None)
+    line_only: Position = (f_data.lineno, f_data.lineno, None, None)
     if f_data.lasti < 0:
         return line_only
-    position = next(islice(code.co_positions(), f_data.lasti // _CODE_UNIT_SIZE, None), None)
+    position = next(islice(code.co_positions(), f_data.lasti // CODE_UNIT_SIZE, None), None)
     if position is None:
         return line_only
     line, end_line, col, end_col = position
@@ -133,34 +65,21 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
     During reconstruction, we must explicitly synchronize these because PyFrame_New
     does not automatically populate the "fast" locals array from a dictionary.
     """
-    reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
+    reconstructed_frames: list[tuple[types.FrameType, FrameData, int]] = []
     for f_data in data.tb_frames:
-        code: CodeType = marshal.loads(f_data.code)  # noqa: S302
+        original: CodeType = marshal.loads(f_data.code)  # noqa: S302
 
-        # In Python 3.11+, accessing f_locals on a frame created via
-        # PyFrame_New for optimized code (functions) causes a segmentation fault
-        # because the internal 'fast' locals array is not initialized.
-        # As a workaround, we create a 'non-optimized' version of the code object
-        # by compiling a dummy string. This ensures the bytecode is safe
-        # (no LOAD_FAST) while preserving metadata like name and filename.
-        # A simple module-level code object never has fast locals.
-        # Since the source is empty, no optimized locals will be created.
-        # Instead, python will go to the unoptimized dictionary we set under frame_locals later.
-        unoptimized_code = compile("", code.co_filename, "exec")
-        code = unoptimized_code.replace(
-            co_name=code.co_name,
-            co_firstlineno=code.co_firstlineno,
-            co_qualname=code.co_qualname,
-            # The synthetic bytecode has nothing to do with the original, so its own
-            # location table (an empty module: line 1, columns 0-0) would put the frame
-            # on the wrong line and draw a bogus caret. Map all of it to the position of
-            # the original failing instruction instead: the stdlib then prints the right
-            # line, ``frame.f_lineno`` answers correctly, and both the ``traceback``
-            # module and the C printer behind the default excepthook draw the same
-            # ``^^^^`` markers they would for the original exception.
-            co_linetable=_location_table(
-                unoptimized_code, code.co_firstlineno, _original_position(code, f_data)
-            ),
+        # The frame must not run the original code object (see ``synthetic_code``), so
+        # it gets an inert one that keeps the original's file, names and the position
+        # of the failing instruction. That position is what makes the stdlib print the
+        # right line, ``frame.f_lineno`` answer correctly, and both the ``traceback``
+        # module and the C printer behind the default excepthook draw the same ``^^^^``
+        # markers they would for the original exception.
+        code, lasti = synthetic_code(
+            original.co_filename,
+            original.co_name,
+            original.co_qualname,
+            _original_position(original, f_data),
         )
 
         # PyFrame_New returns a new reference to a PyFrameObject.
@@ -175,16 +94,16 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
             # link the frame back to the previously constructed frame.
             link_frame(frame, reconstructed_frames[-1][0])
 
-        reconstructed_frames.append((frame, f_data))
+        reconstructed_frames.append((frame, f_data, lasti))
 
     tb_next: types.TracebackType | None = None
-    for frame, f_data in reversed(reconstructed_frames):
+    for frame, f_data, lasti in reversed(reconstructed_frames):
         tb_next = types.TracebackType(
             tb_next=tb_next,
             tb_frame=frame,
             # The original ``lasti`` indexes into the original bytecode, not the synthetic
             # one above; it was consumed by ``_original_position`` instead.
-            tb_lasti=_SYNTHETIC_LASTI,
+            tb_lasti=lasti,
             tb_lineno=f_data.lineno,
         )
     return tb_next
@@ -294,6 +213,7 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     instead of an endless chain of copies, and it keeps a node that is reachable twice a
     single shared object.
     """
+    ensure_supported()
     nodes, unpickled = _build_order(data)
 
     built: dict[int, BaseException] = {}

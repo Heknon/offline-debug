@@ -8,7 +8,6 @@ the api to create a FrameType using pure python.
 from __future__ import annotations
 
 import ctypes
-import sys
 from functools import cache
 from types import CodeType, FrameType
 from typing import TYPE_CHECKING, Any
@@ -81,13 +80,14 @@ def create_frame(
 
     frame: FrameType = py_frame_new(thread_state, code, frame_globals, frame_locals)
 
-    # In 3.13+, PEP 667 allows safe write-through access to locals.
-    # py_frame_new ignores the frame_locals argument,
-    # and must be assigned after the frame's creation in 3.13+
-    if sys.version_info >= (3, 13) and frame_locals:
-        frame.f_locals.update(frame_locals)
-
     if not isinstance(frame, FrameType):
         msg = f"Expected types.FrameType, but got {type(frame).__name__}"
         raise TypeError(msg)
+
+    # Whether PyFrame_New adopts ``frame_locals`` as the frame's own dictionary
+    # (3.12) or ignores it and exposes a write-through proxy instead (3.13+, PEP 667),
+    # writing the locals through ``f_locals`` afterwards lands them where the frame
+    # reads them; when the dictionary was adopted this merely updates it with itself.
+    if frame_locals:
+        frame.f_locals.update(frame_locals)
     return frame

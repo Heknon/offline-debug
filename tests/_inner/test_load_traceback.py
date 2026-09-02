@@ -10,11 +10,8 @@ from typing import TYPE_CHECKING, Never
 import pytest
 
 from offline_debug import FrameData, load_traceback, save_traceback
-from offline_debug._inner.load_traceback import (
-    _MAX_UNITS_PER_ENTRY,
-    _location_table,
-    _original_position,
-)
+from offline_debug._inner.load_traceback import _original_position
+from offline_debug._inner.synthetic_code import synthetic_code
 from tests.helpers import roundtrip
 
 if TYPE_CHECKING:
@@ -112,50 +109,6 @@ def test_load_traceback_should_raise_false() -> None:
     assert str(loaded_exc) == "test_raise_false"
 
 
-@pytest.mark.parametrize(
-    ("firstlineno", "position"),
-    [
-        (1, (1, 1, None, None)),  # zero delta, no columns
-        (10, (12, 12, None, None)),  # small positive delta: one varint byte
-        (10, (3, 3, None, None)),  # negative delta: the sign bit
-        (1, (100, 100, None, None)),  # delta beyond one 6-bit payload: a continuation byte
-        (1, (70_000, 70_000, None, None)),  # several continuation bytes
-        (1, (1, 1, 0, 0)),  # columns: the zero column must survive the plus-one encoding
-        (5, (8, 8, 4, 20)),  # an ordinary single-line expression
-        (5, (8, 11, 4, 1)),  # a multi-line expression: end line delta, end column below start
-        (10, (3, 3, 100, 250)),  # negative line delta with multi-byte columns
-    ],
-)
-def test_location_table_matches_cpython_decoding(
-    firstlineno: int, position: tuple[int, int, int | None, int | None]
-) -> None:
-    """CPython must decode the hand-built table as "every instruction at ``position``"."""
-    base = compile("", "<synthetic>", "exec")
-
-    code = base.replace(
-        co_firstlineno=firstlineno,
-        co_linetable=_location_table(base, firstlineno, position),
-    )
-
-    units = len(code.co_code) // 2
-    assert list(code.co_positions()) == [position] * units
-    assert [line for _, _, line in code.co_lines()] == [position[0]]
-
-
-@pytest.mark.parametrize("position", [(42, 42, None, None), (42, 43, 7, 9)])
-def test_location_table_covers_code_longer_than_one_entry(
-    position: tuple[int, int, int | None, int | None],
-) -> None:
-    """A code object needing several entries still maps every instruction."""
-    code = compile("\n".join(f"v{i} = {i}" for i in range(20)), "<synthetic>", "exec")
-    units = len(code.co_code) // 2
-    assert units > _MAX_UNITS_PER_ENTRY
-
-    code = code.replace(co_linetable=_location_table(code, code.co_firstlineno, position))
-
-    assert list(code.co_positions()) == [position] * units
-
-
 def _frame_data(lasti: int, lineno: int) -> FrameData:
     """Build the parts of a ``FrameData`` that ``_original_position`` reads."""
     return FrameData(code=b"", globals={}, locals={}, lasti=lasti, lineno=lineno, stack_depth=1)
@@ -200,9 +153,9 @@ def test_original_position_falls_back_for_an_unusable_offset(lasti: int) -> None
 
 def test_original_position_falls_back_when_the_instruction_has_no_columns() -> None:
     """Code without column information (``-X no_debug_ranges``) yields the line alone."""
-    code, lasti, lineno = _failing_instruction()
-    columnless = code.replace(
-        co_linetable=_location_table(code, code.co_firstlineno, (lineno, lineno, None, None))
+    code, _, lineno = _failing_instruction()
+    columnless, lasti = synthetic_code(
+        code.co_filename, code.co_name, code.co_qualname, (lineno, lineno, None, None)
     )
 
     assert _original_position(columnless, _frame_data(lasti, lineno)) == (

@@ -131,10 +131,11 @@ def instruction_position(
 
 def test_loaded_frames_carry_the_original_positions() -> None:
     """
-    Reconstructed code objects map every instruction to the original failing position.
+    Reconstructed code objects put every instruction on the original failing line.
 
-    That is what makes the stdlib formatter, ``frame.f_lineno`` and ``tb_lineno`` agree,
-    and gives every printer the columns to draw the same ``^^^^`` markers as the original.
+    That is what makes the stdlib formatter, ``frame.f_lineno`` and ``tb_lineno`` agree.
+    The instruction the traceback entry points at also carries the original columns,
+    which gives every printer what it needs to draw the same ``^^^^`` markers.
     """
     original = make_error()
     expected = original_entries(original)
@@ -148,7 +149,8 @@ def test_loaded_frames_carry_the_original_positions() -> None:
         assert tb.tb_lasti >= 0
         assert tb.tb_lineno == original_tb.tb_lineno
         assert tb.tb_frame.f_lineno == original_tb.tb_lineno
-        assert set(tb.tb_frame.f_code.co_positions()) == {position}
+        assert instruction_position(tb) == position
+        assert {line for line, *_ in tb.tb_frame.f_code.co_positions()} == {original_tb.tb_lineno}
 
 
 def divide(numerator: int, denominator: int) -> float:

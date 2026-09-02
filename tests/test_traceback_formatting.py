@@ -21,15 +21,8 @@ import traceback
 from io import BytesIO
 from typing import Never
 
-from offline_debug import ExceptionData, load_traceback, save_traceback
-
-
-def roundtrip(exc: BaseException) -> BaseException:
-    """Save an exception to a buffer and load it back without raising."""
-    buffer = BytesIO()
-    save_traceback(exc, buffer)
-    buffer.seek(0)
-    return load_traceback(buffer, should_raise=False)
+from offline_debug import ExceptionData, load_traceback
+from tests.helpers import roundtrip
 
 
 def formatted(exc: BaseException) -> str:

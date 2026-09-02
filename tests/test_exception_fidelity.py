@@ -9,21 +9,12 @@ protocol hooks — must round-trip exactly as vanilla pickle would.
 
 from __future__ import annotations
 
-from io import BytesIO
 from typing import Never, Self
 
-from offline_debug import load_traceback, save_traceback
+from tests.helpers import roundtrip
 
 EXPECTED_ERRNO = 2
 EXPECTED_VALUE = 42
-
-
-def roundtrip(exc: BaseException) -> BaseException:
-    """Save an exception to a buffer and load it back without raising."""
-    buffer = BytesIO()
-    save_traceback(exc, buffer)
-    buffer.seek(0)
-    return load_traceback(buffer, should_raise=False)
 
 
 class SetstateError(Exception):

@@ -20,45 +20,20 @@ import json
 import pickle
 import sys
 from io import BytesIO
-from typing import TYPE_CHECKING
 
 import pytest
 
 from offline_debug import (
-    ExceptionData,
     ExceptionGroupData,
     load_traceback,
     parse_traceback,
     save_traceback,
     walk_exception_data,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+from tests.helpers import roundtrip
 
 MAX_NODES_PER_LINK = 2
 DEEP_CHAIN_LINKS = 400
-
-
-def roundtrip(exc: BaseException) -> BaseException:
-    """Save an exception to a buffer and load it back without raising."""
-    buffer = BytesIO()
-    save_traceback(exc, buffer)
-    buffer.seek(0)
-    return load_traceback(buffer, should_raise=False)
-
-
-def walk_nodes(data: ExceptionData) -> Iterator[ExceptionData]:
-    """Yield every distinct node of a saved exception graph exactly once."""
-    seen: set[int] = set()
-    stack = [data]
-    while stack:
-        node = stack.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        yield node
-        stack.extend(link for link in (node.cause, node.context) if link is not None)
 
 
 def self_caused() -> BaseException:
@@ -169,7 +144,7 @@ def test_chained_exceptions_stay_linear() -> None:
     save_traceback(chain(links), buffer)
     buffer.seek(0)
 
-    node_count = sum(1 for _ in walk_nodes(parse_traceback(buffer)))
+    node_count = sum(1 for _ in walk_exception_data(parse_traceback(buffer)))
 
     assert node_count <= links * MAX_NODES_PER_LINK
 

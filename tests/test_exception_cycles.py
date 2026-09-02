@@ -35,7 +35,10 @@ from offline_debug import (
 from tests.helpers import roundtrip
 
 MAX_NODES_PER_LINK = 2
-DEEP_CHAIN_LINKS = 400
+# Above the default recursion limit, which the pre-0.4.0 recursive walk could not get past,
+# and below the ceiling the dump's nesting imposes on pickle (see the ``save_traceback``
+# docstring), so the round trip is exercised well past the old failure point.
+DEEP_CHAIN_LINKS = 1500
 
 
 def self_caused() -> BaseException:
@@ -151,8 +154,14 @@ def test_chained_exceptions_stay_linear() -> None:
     assert node_count <= links * MAX_NODES_PER_LINK
 
 
-def test_deep_chain_is_not_recursion_bound() -> None:
-    """A long but acyclic cause chain must not exhaust the interpreter stack."""
+def test_deep_chain_round_trips_past_the_recursion_limit() -> None:
+    """
+    A long but acyclic cause chain must round-trip well past the interpreter's limit.
+
+    The remaining bound is pickle's, on the depth of the nested dump, and lies far above
+    the limit set here (see the ``save_traceback`` docstring).
+    """
+    assert sys.getrecursionlimit() < DEEP_CHAIN_LINKS
     deepest: BaseException = ValueError("root")
     for i in range(DEEP_CHAIN_LINKS):
         nxt = RuntimeError(f"lvl{i}")

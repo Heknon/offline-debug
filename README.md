@@ -98,6 +98,11 @@ payload = [
 ]
 ```
 
+Chains are walked iteratively, so `sys.getrecursionlimit()` does not bound them. The dump itself
+does have a ceiling: it nests every node inside the node that links to it, and pickling that
+nesting is recursive at the C level, so a `__cause__`/`__context__` chain of roughly 3,000 links
+is the practical maximum, past which `save_traceback` raises `RecursionError`.
+
 ### Dump Compatibility
 
 The on-disk layout gained one optional field in 0.4.0 (`suppress_context`, defaulting to

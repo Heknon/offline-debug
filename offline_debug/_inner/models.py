@@ -59,10 +59,11 @@ def walk_exception_data(data: ExceptionData) -> Iterator[ExceptionData]:
     links naively either visits a node repeatedly or never terminates.
 
     This is the traversal any consumer should use to render or re-serialize a dump:
-    it is iterative (so a deep chain cannot exhaust the stack) and it stops descending
-    as soon as it reaches a node it has already yielded. Use ``id()`` of the yielded
-    nodes to reference them — that identity is what encodes cycles and sharing, and it
-    is what a JSON projection needs in order to emit references instead of nesting.
+    it is iterative (so walking a deep chain cannot exhaust the stack) and it stops
+    descending as soon as it reaches a node it has already yielded. Use ``id()`` of the
+    yielded nodes to reference them — that identity is what encodes cycles and sharing,
+    and it is what a JSON projection needs in order to emit references instead of
+    nesting.
     """
     seen: set[int] = set()
     stack = [data]

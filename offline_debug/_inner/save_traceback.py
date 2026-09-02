@@ -205,7 +205,15 @@ def _serialize_exc_data(
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:
-    """Serialize an exception and its traceback to a file."""
+    """
+    Serialize an exception and its traceback to a file.
+
+    The exception graph is walked iteratively, so the interpreter's recursion limit does
+    not bound it. The dump, however, nests every node inside the node that links to it,
+    and pickling that nesting is recursive at the C level: a ``__cause__``/``__context__``
+    chain of roughly 3,000 links is the practical ceiling, past which this raises
+    ``RecursionError`` regardless of ``sys.setrecursionlimit``.
+    """
     data = _serialize_exc_data(exc, roundtrip_cache={})
     if file is None:
         return data

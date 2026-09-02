@@ -175,3 +175,21 @@ def test_exception_group_subclass_without_derive() -> None:
 
     assert isinstance(loaded_exc, CodedGroup)
     assert loaded_exc.code == EXPECTED_VALUE
+
+
+def test_base_exception_group_stays_a_base_exception_group() -> None:
+    """
+    A ``BaseExceptionGroup`` holding a ``BaseException`` must not load as ``ExceptionGroup``.
+
+    ``BaseExceptionGroup.__new__`` downgrades a plain ``BaseExceptionGroup`` to
+    ``ExceptionGroup`` when every member is an ``Exception``, so the stand-in member the
+    saved skeleton holds must be as "base" as the group's real members.
+    """
+    try:
+        raise BaseExceptionGroup("grp", [KeyboardInterrupt()])
+    except BaseExceptionGroup as e:
+        loaded_exc = roundtrip(e)
+
+    assert isinstance(loaded_exc, BaseExceptionGroup)
+    assert type(loaded_exc) is BaseExceptionGroup
+    assert isinstance(loaded_exc.exceptions[0], KeyboardInterrupt)

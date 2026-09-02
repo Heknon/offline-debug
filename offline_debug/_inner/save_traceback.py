@@ -6,7 +6,11 @@ import types
 from io import BytesIO
 from pathlib import Path
 
-from offline_debug._inner._pickle_helpers import exception_safe_dump, exception_safe_dumps
+from offline_debug._inner._pickle_helpers import (
+    exception_safe_dump,
+    exception_safe_dumps,
+    reconstruct_exception_group,
+)
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
@@ -91,10 +95,40 @@ def _serialize_frames(
     return tb_frames
 
 
+def _member_stand_in(group: BaseExceptionGroup[BaseException]) -> BaseException:
+    """
+    Return the single stand-in member that the pickled skeleton of ``group`` holds.
+
+    A ``BaseExceptionGroup`` cannot be empty, so the skeleton needs one member, and it
+    must be as "base" as the group itself: ``BaseExceptionGroup.__new__`` turns a plain
+    ``BaseExceptionGroup`` holding only ``Exception`` members into an ``ExceptionGroup``,
+    and rejects a ``BaseException`` member inside an ``Exception`` subclass -- either
+    would record the wrong class in the dump.
+    """
+    cls = Exception if isinstance(group, Exception) else BaseException
+    return cls("member saved as a separate node")
+
+
+def _group_skeleton(group: BaseExceptionGroup[BaseException]) -> BaseExceptionGroup[BaseException]:
+    """
+    Return a copy of ``group`` whose members are replaced by a single stand-in.
+
+    Members are saved as nodes of their own and the loader rebuilds the group around
+    those (see ``load_traceback._build_exception``), so pickling them along with the
+    group would only duplicate every member -- once per level for nested groups -- and
+    let a single member that fails to load take the whole group down with it, since the
+    placeholder replaces the entire pickle.
+    """
+    return reconstruct_exception_group(
+        type(group), group.message, (_member_stand_in(group),), group.__dict__.copy() or None
+    )
+
+
 def _pickle_exception(exc: BaseException) -> bytes:
     """Pickle ``exc`` itself, falling back to a placeholder if it cannot round-trip."""
     try:
-        exc_pickle = exception_safe_dumps(exc)
+        to_pickle = _group_skeleton(exc) if isinstance(exc, BaseExceptionGroup) else exc
+        exc_pickle = exception_safe_dumps(to_pickle)
         # A dump that cannot be loaded later is worse than a placeholder, so also
         # verify the exception survives loading (e.g. a custom __reduce__ whose
         # reconstruction fails only at load time).

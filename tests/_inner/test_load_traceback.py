@@ -156,6 +156,14 @@ class LoadFailGroup(ExceptionGroup):
         return (_raise_on_load, ())
 
 
+class LoadFailError(Exception):
+    """Exception that pickles fine but whose reconstruction fails at load time."""
+
+    def __reduce__(self) -> tuple:
+        """Reduce to a callable that raises when the pickle is loaded."""
+        return (_raise_on_load, ())
+
+
 def record_rebuilt_exceptions(monkeypatch) -> list[str]:
     """Record the type name of every exception whose traceback the loader rebuilds."""
     import offline_debug._inner.load_traceback as load_module
@@ -209,3 +217,26 @@ def test_placeholder_group_members_reached_by_a_link_are_still_rebuilt(monkeypat
     assert isinstance(restored, RuntimeError)
     assert isinstance(restored.__cause__, ValueError)
     assert sorted(rebuilt) == ["RuntimeError", "ValueError"]
+
+
+def test_group_survives_a_member_that_fails_only_on_load() -> None:
+    """
+    One member that cannot be loaded must not take its whole group down.
+
+    The group's own pickle carries no members -- they are nodes of their own -- so a
+    member's load failure is confined to that member's placeholder.
+    """
+    try:
+        raise ExceptionGroup("group", [LoadFailError("bad"), ValueError("good")])
+    except ExceptionGroup as err:
+        original = err
+
+    restored = roundtrip(original)
+
+    assert isinstance(restored, ExceptionGroup)
+    assert restored.message == "group"
+    bad, good = restored.exceptions
+    assert isinstance(bad, RuntimeError)
+    assert "Unpicklable exception LoadFailError" in str(bad)
+    assert isinstance(good, ValueError)
+    assert str(good) == "good"

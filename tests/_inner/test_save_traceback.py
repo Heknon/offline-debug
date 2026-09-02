@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Never
 
 import pytest
 
-from offline_debug import ExceptionData, load_traceback, save_traceback
+from offline_debug import ExceptionData, ExceptionGroupData, load_traceback, save_traceback
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -238,3 +238,22 @@ def test_save_traceback_file_none() -> None:
     exc = ValueError("test")
     data = save_traceback(exc, None)
     assert isinstance(data, ExceptionData)
+
+
+def test_group_pickle_holds_no_members() -> None:
+    """
+    A group's own pickle must not carry its members.
+
+    Members are saved as nodes of their own and the loader rebuilds the group around
+    those, so embedding them too would duplicate every member -- once per nesting
+    level -- and let a single member's load failure replace the whole group.
+    """
+    inner = ExceptionGroup("inner", [ValueError("needle")])
+    data = save_traceback(ExceptionGroup("outer", [inner]), None)
+
+    assert isinstance(data, ExceptionGroupData)
+    inner_data = data.exceptions[0]
+    assert isinstance(inner_data, ExceptionGroupData)
+    assert b"needle" in inner_data.exceptions[0].exc_pickle
+    assert b"needle" not in inner_data.exc_pickle
+    assert b"needle" not in data.exc_pickle

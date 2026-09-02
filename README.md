@@ -126,14 +126,25 @@ not one whose graph genuinely contains a cycle (`raise e from e`): the pre-0.4.0
 - **True Frame Reconstruction**: Uses `ctypes` to call `PyFrame_New` from the Python C API. This creates real `frame` objects
   which are required for a valid `types.TracebackType`.
 - **Position Fidelity**: Reconstructed frames carry a synthetic code object (real optimized bytecode
-  would segfault on `f_locals` access) whose location table maps every instruction to the position of
-  the original failing instruction: its line and, when the original code recorded them, its columns.
-  Tracebacks print with correct files, lines and functions from every printer, `frame.f_lineno` is
-  accurate, and the `^^^^` markers under the failing expression match the original's. Only code that
-  carried no column information (e.g. run with `-X no_debug_ranges`) maps to its line alone.
-- **Python 3.13 Compatibility**: Leverages PEP 667 features where `f_locals` is a write-through proxy, allowing for accurate local
-  variable restoration.
-- **Support python 3.12 as well**
+  would segfault on `f_locals` access) whose instructions all sit at the position of the original
+  failing instruction: its line and, when the original code recorded them, its columns. Tracebacks
+  print with correct files, lines and functions from every printer, `frame.f_lineno` is accurate, and
+  the `^^^^` markers under the failing expression match the original's. Only code that carried no
+  column information (e.g. run with `-X no_debug_ranges`) maps to its line alone. The interpreter's own
+  compiler builds that code object from an AST positioned at the failing instruction, so no part of
+  the private location-table format is encoded by hand. One consequence: a reconstructed frame's
+  `co_firstlineno` is the failing line, not the line its function was defined on.
+- **Locals Restoration**: Locals are written back through `frame.f_locals`, which works whether
+  `PyFrame_New` adopts the dictionary it is given (3.12) or exposes a write-through proxy
+  (3.13+, PEP 667), without checking the version.
+- **Interpreter Self-Check**: Frame reconstruction relies on CPython internals, so before the first
+  dump is loaded the library rebuilds a small two-frame traceback with the same machinery and checks
+  everything a loaded exception depends on: frame creation, `f_back` linking, locals, line numbers,
+  and what the `traceback` module sees. An interpreter that fails raises `UnsupportedInterpreterError`
+  from `load_traceback` instead of crashing or producing a wrong traceback; `parse_traceback` still
+  works there. Call `ensure_supported()` yourself to run the check eagerly, e.g. at startup. The check
+  is evidence, not proof (it cannot detect memory corruption that leaves the checked properties
+  intact), which is why the supported Python range stays pinned.
 - **Resilient Serialization**:
     - `pickle` is used for exceptions and variables.
     - `marshal` is used for code objects.

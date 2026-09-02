@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Never
 import pytest
 
 from offline_debug import load_traceback, save_traceback
+from offline_debug._inner.load_traceback import _MAX_UNITS_PER_ENTRY, _line_only_linetable
 from tests.helpers import roundtrip
 
 if TYPE_CHECKING:
@@ -105,6 +106,41 @@ def test_load_traceback_should_raise_false() -> None:
     loaded_exc = load_traceback(buffer, should_raise=False)
     assert isinstance(loaded_exc, ValueError)
     assert str(loaded_exc) == "test_raise_false"
+
+
+@pytest.mark.parametrize(
+    ("firstlineno", "lineno"),
+    [
+        (1, 1),  # zero delta
+        (10, 12),  # small positive delta: one varint byte
+        (10, 3),  # negative delta: the sign bit
+        (1, 100),  # delta beyond one 6-bit payload: a continuation byte
+        (1, 70_000),  # several continuation bytes
+    ],
+)
+def test_line_only_linetable_matches_cpython_decoding(firstlineno: int, lineno: int) -> None:
+    """CPython must decode the hand-built table as "every instruction on ``lineno``"."""
+    base = compile("", "<synthetic>", "exec")
+
+    code = base.replace(
+        co_firstlineno=firstlineno,
+        co_linetable=_line_only_linetable(base, firstlineno, lineno),
+    )
+
+    units = len(code.co_code) // 2
+    assert list(code.co_positions()) == [(lineno, lineno, None, None)] * units
+    assert [line for _, _, line in code.co_lines()] == [lineno]
+
+
+def test_line_only_linetable_covers_code_longer_than_one_entry() -> None:
+    """A code object needing several entries still maps every instruction."""
+    code = compile("\n".join(f"v{i} = {i}" for i in range(20)), "<synthetic>", "exec")
+    units = len(code.co_code) // 2
+    assert units > _MAX_UNITS_PER_ENTRY
+
+    code = code.replace(co_linetable=_line_only_linetable(code, code.co_firstlineno, 42))
+
+    assert list(code.co_positions()) == [(42, 42, None, None)] * units
 
 
 def _raise_on_load() -> Never:

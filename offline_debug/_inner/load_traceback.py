@@ -19,10 +19,59 @@ from offline_debug._inner.models import (
     FrameData,
 )
 
-# Sentinel ``tb_lasti`` meaning "no bytecode offset applies to this frame".
-# ``traceback._get_code_position`` returns no position for a negative offset, which
-# makes the stdlib fall back to ``tb_lineno`` instead of indexing ``co_positions()``.
-_NO_INSTRUCTION_OFFSET = -1
+# Instruction offset every reconstructed traceback entry points at. The synthetic code
+# object built in ``_reconstruct_frames`` maps *all* of its instructions to the restored
+# line, so any offset would resolve to the same position; the first one is always valid.
+_SYNTHETIC_LASTI = 0
+
+# ``co_linetable`` encoding (``Objects/locations.md`` in CPython): a sequence of entries,
+# each a header byte ``0b1_CCCC_LLL`` -- location code ``CCCC`` covering ``LLL + 1`` code
+# units -- followed by code-specific varints. Code 13 is "line only, no columns", followed
+# by one signed varint holding the line delta from the previous entry, which for the
+# first entry is relative to ``co_firstlineno``. Varints carry 6 payload bits per byte,
+# least significant first, with bit 6 set on every byte but the last; signed values put
+# the sign in the low bit and the magnitude above it.
+_ENTRY_HEADER_FLAG = 0x80
+_NO_COLUMNS_LOCATION_CODE = 13
+_MAX_UNITS_PER_ENTRY = 8
+_CODE_UNIT_SIZE = 2
+_VARINT_PAYLOAD_BITS = 6
+_VARINT_PAYLOAD_MASK = (1 << _VARINT_PAYLOAD_BITS) - 1
+_VARINT_CONTINUATION_FLAG = 1 << _VARINT_PAYLOAD_BITS
+
+
+def _varint(value: int) -> bytes:
+    """Encode an unsigned integer as a location table varint."""
+    encoded = bytearray()
+    while value > _VARINT_PAYLOAD_MASK:
+        encoded.append(_VARINT_CONTINUATION_FLAG | (value & _VARINT_PAYLOAD_MASK))
+        value >>= _VARINT_PAYLOAD_BITS
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _signed_varint(value: int) -> bytes:
+    """Encode a signed integer as a location table varint."""
+    return _varint(((-value) << 1) | 1 if value < 0 else value << 1)
+
+
+def _line_only_linetable(code: CodeType, firstlineno: int, lineno: int) -> bytes:
+    """
+    Build a ``co_linetable`` placing every instruction of ``code`` on ``lineno``, columnless.
+
+    ``firstlineno`` is the ``co_firstlineno`` the table will be paired with, since the
+    first entry's line is stored relative to it.
+    """
+    units = len(code.co_code) // _CODE_UNIT_SIZE
+    delta = lineno - firstlineno
+    table = bytearray()
+    while units > 0:
+        run = min(units, _MAX_UNITS_PER_ENTRY)
+        table.append(_ENTRY_HEADER_FLAG | (_NO_COLUMNS_LOCATION_CODE << 3) | (run - 1))
+        table += _signed_varint(delta)
+        delta = 0
+        units -= run
+    return bytes(table)
 
 
 def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
@@ -56,6 +105,13 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
             co_name=code.co_name,
             co_firstlineno=code.co_firstlineno,
             co_qualname=code.co_qualname,
+            # The synthetic bytecode has nothing to do with the original, so its own
+            # location table (an empty module: line 1, columns 0-0) would put the frame
+            # on the wrong line and draw a bogus caret. Map all of it to the restored
+            # line with no columns instead: the stdlib then prints the right line,
+            # ``frame.f_lineno`` answers correctly, and neither the ``traceback`` module
+            # nor the C printer behind the default excepthook draws ``^^^^`` markers.
+            co_linetable=_line_only_linetable(unoptimized_code, code.co_firstlineno, f_data.lineno),
         )
 
         # PyFrame_New returns a new reference to a PyFrameObject.
@@ -77,18 +133,9 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
         tb_next = types.TracebackType(
             tb_next=tb_next,
             tb_frame=frame,
-            # The original ``lasti`` indexes into the original bytecode, but the frame
-            # above deliberately carries a synthetic (empty) code object, so the two do
-            # not correspond. Handing the real ``lasti`` to the stdlib makes
-            # ``traceback._get_code_position`` walk ``co_positions()`` of a two-entry
-            # code object looking for instruction ``lasti // 2``, which raises
-            # StopIteration inside a generator -- surfacing as ``RuntimeError: generator
-            # raised StopIteration`` from any attempt to format the exception.
-            #
-            # A negative ``lasti`` is the stdlib's own signal for "no instruction
-            # position available": it then falls back to ``tb_lineno``, which we restore
-            # accurately. ``FrameData.lasti`` stays in the dump as original metadata.
-            tb_lasti=_NO_INSTRUCTION_OFFSET,
+            # The original ``lasti`` indexes into the original bytecode, not the synthetic
+            # one above; ``FrameData.lasti`` stays in the dump as original metadata.
+            tb_lasti=_SYNTHETIC_LASTI,
             tb_lineno=f_data.lineno,
         )
     return tb_next

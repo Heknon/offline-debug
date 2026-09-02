@@ -10,19 +10,25 @@ instruction ``lasti // 2``. That raises StopIteration inside a generator, which
 surfaced as ``RuntimeError: generator raised StopIteration`` from *any* attempt
 to format a loaded exception -- the library's central promise.
 
-Reconstructed frames now report no instruction offset, so the stdlib falls back
-to ``tb_lineno``, which is restored accurately.
+Reconstructed frames now carry a location table that maps every synthetic
+instruction to the restored line without columns, so every printer -- the
+``traceback`` module and the C printer behind the default excepthook alike --
+shows the right line and draws no caret markers.
 """
 
 from __future__ import annotations
 
 import pickle
+import sys
 import traceback
 from io import BytesIO
-from typing import Never
+from typing import TYPE_CHECKING, Never
 
 from offline_debug import ExceptionData, load_traceback
 from tests.helpers import roundtrip
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 
 def formatted(exc: BaseException) -> str:
@@ -33,6 +39,16 @@ def formatted(exc: BaseException) -> str:
 def positions(exc: BaseException) -> list[tuple[str, int | None, str]]:
     """Return ``(filename, lineno, function)`` for every frame of a traceback."""
     return [(f.filename, f.lineno, f.name) for f in traceback.extract_tb(exc.__traceback__)]
+
+
+def reconstructed_entries(exc: BaseException, count: int) -> list[TracebackType]:
+    """Return the last ``count`` traceback entries: the ones rebuilt from the dump."""
+    entries: list[TracebackType] = []
+    tb = exc.__traceback__
+    while tb is not None:
+        entries.append(tb)
+        tb = tb.tb_next
+    return entries[-count:]
 
 
 def inner() -> None:
@@ -92,6 +108,46 @@ def test_loaded_frames_report_source_lines() -> None:
 
     assert "in inner" in text
     assert "raise ValueError(str(local_value))" in text
+
+
+def test_loaded_frames_carry_line_only_positions() -> None:
+    """
+    Reconstructed code objects map every instruction to the restored line, columnless.
+
+    That is what makes the stdlib formatter, ``frame.f_lineno`` and ``tb_lineno`` agree
+    while no printer has columns to draw ``^^^^`` markers from.
+    """
+    original = make_error()
+    expected = positions(original)
+    restored = roundtrip(original)
+
+    entries = reconstructed_entries(restored, len(expected))
+
+    for tb, (_, lineno, _) in zip(entries, expected, strict=True):
+        assert tb.tb_lasti >= 0
+        assert tb.tb_lineno == lineno
+        assert tb.tb_frame.f_lineno == lineno
+        assert set(tb.tb_frame.f_code.co_positions()) == {(lineno, lineno, None, None)}
+
+
+def test_default_excepthook_prints_no_caret_lines(capsys) -> None:
+    """
+    The default excepthook must print reconstructed frames without stray caret lines.
+
+    Python 3.12 prints unhandled exceptions from C rather than through the
+    ``traceback`` module the other tests exercise, and that printer drew a zero-width
+    caret line -- an empty line -- under every reconstructed frame.
+    """
+    original = make_error()
+    restored = roundtrip(original)
+
+    sys.__excepthook__(type(restored), restored, restored.__traceback__)
+    err = capsys.readouterr().err
+
+    assert "ValueError: 42" in err
+    for filename, lineno, name in positions(original):
+        assert f'File "{filename}", line {lineno}, in {name}' in err
+    assert all(line.strip() for line in err.rstrip("\n").splitlines())
 
 
 def test_chained_exception_keeps_cause_wording() -> None:

@@ -26,6 +26,7 @@ ignore = [
     "D212", # Multi-line docstring summary should start at the first line
     "COM812", # Trailing comma missing
     "PLC0415", # import should be at top of file
+    "CPY001", # Missing copyright notice (stable in ruff >= 0.16; the project has no headers)
 ]
 
 [tool.ruff.lint.per-file-ignores]

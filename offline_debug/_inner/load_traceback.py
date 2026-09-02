@@ -94,49 +94,85 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
     return tb_next
 
 
-def _collect_nodes(root: ExceptionData) -> list[ExceptionData]:
-    """
-    List every node reachable from ``root``, sub-exceptions always before their group.
-
-    A group can only be rebuilt once its members exist, whereas ``cause``/``context`` are
-    assigned after the fact, so ``exceptions`` is the only edge that constrains build
-    order. The walk is iterative and identity-memoized because the graph may contain
-    cycles (see :func:`_reconstruct_exc_data`).
-    """
-    seen: set[int] = set()
-    order: list[ExceptionData] = []
-    stack: list[tuple[ExceptionData, bool]] = [(root, False)]
-
-    while stack:
-        node, children_done = stack.pop()
-        if children_done:
-            order.append(node)
-            continue
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        # Re-push the node below its children so it is emitted after them.
-        stack.append((node, True))
-        if isinstance(node, ExceptionGroupData):
-            stack.extend((sub, False) for sub in node.exceptions)
-        stack.extend((link, False) for link in (node.cause, node.context) if link is not None)
-
-    return order
-
-
-def _build_exception(data: ExceptionData, built: dict[int, BaseException]) -> BaseException:
-    """Rebuild one exception with its traceback, taking sub-exceptions from ``built``."""
-    exc: BaseException = pickle.loads(data.exc_pickle)  # noqa: S301
+def _unpickle_exception(data: ExceptionData) -> BaseException:
+    """Unpickle the exception object stored on ``data``."""
+    exc = pickle.loads(data.exc_pickle)  # noqa: S301
     if not isinstance(exc, BaseException):
         msg = f"Expected BaseException, but got {type(exc).__name__}"
         raise TypeError(msg)
+    return exc
 
+
+def _members(data: ExceptionData, exc: BaseException) -> list[ExceptionData]:
+    """
+    Return the sub-exceptions ``data`` has to be rebuilt around, if any.
+
+    A group whose own pickle fell back to the ``RuntimeError`` placeholder loads as a
+    plain exception that references none of its members, so rebuilding them (frames and
+    all) would be wasted work. They are still built if something else links to them.
+    """
+    if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
+        return data.exceptions
+    return []
+
+
+def _build_order(root: ExceptionData) -> tuple[list[ExceptionData], dict[int, BaseException]]:
+    """
+    List every node that has to be rebuilt, each group after its members.
+
+    Only ``exceptions`` edges constrain build order: a group is rebuilt around
+    already-built members, whereas ``cause``/``context`` are assigned afterwards (see
+    :func:`_reconstruct_exc_data`). So the walk is a post-order depth-first search over
+    ``exceptions`` edges alone, and every ``cause``/``context`` target is queued as a new
+    *starting point* that is only taken up once the current search has finished.
+    Following a link mid-search would let a group that is first reached through one of
+    its own members -- ``except ExceptionGroup as g: raise g.exceptions[0]`` saves
+    exactly that shape -- be emitted before that member.
+
+    Each node is unpickled exactly once, on discovery, so that the members of a group
+    that loaded as a placeholder can be pruned (see :func:`_members`); the unpickled
+    objects are returned alongside the order for the build pass. The walk is iterative
+    and identity-memoized because the graph may contain cycles.
+
+    This deliberately does not reuse :func:`walk_exception_data`: that traversal reports
+    every node in no particular order, whereas this one prunes and orders.
+    """
+    seen: set[int] = set()
+    order: list[ExceptionData] = []
+    unpickled: dict[int, BaseException] = {}
+    starts: list[ExceptionData] = [root]
+
+    while starts:
+        stack: list[tuple[ExceptionData, bool]] = [(starts.pop(), False)]
+        while stack:
+            node, members_done = stack.pop()
+            if members_done:
+                order.append(node)
+                continue
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            exc = unpickled[id(node)] = _unpickle_exception(node)
+            starts.extend(link for link in (node.cause, node.context) if link is not None)
+            # Re-push the node below its members so it is emitted after them.
+            stack.append((node, True))
+            stack.extend((sub, False) for sub in _members(node, exc))
+
+    return order, unpickled
+
+
+def _build_exception(
+    data: ExceptionData, exc: BaseException, built: dict[int, BaseException]
+) -> BaseException:
+    """Give the unpickled ``exc`` its traceback, rebuilding a group around ``built`` members."""
     if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
         try:
             inner_excs = [built[id(sub)] for sub in data.exceptions]
         except KeyError:
-            # Only reachable from a hand-crafted dump: a group that (transitively)
-            # contains itself cannot be built, since its members must exist first.
+            # Only reachable from a hand-crafted dump: a real group's members are fixed
+            # at construction, so ``save_traceback`` can never record a group that
+            # (transitively) contains itself -- and such a group has no valid build
+            # order, since its members must exist first.
             msg = "Cannot reconstruct an exception group that transitively contains itself"
             raise ValueError(msg) from None
         # The exceptions inside the unpickled exc object have incomplete data, so
@@ -162,11 +198,11 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     instead of an endless chain of copies, and it keeps a node that is reachable twice a
     single shared object.
     """
-    nodes = _collect_nodes(data)
+    nodes, unpickled = _build_order(data)
 
     built: dict[int, BaseException] = {}
     for node in nodes:
-        built[id(node)] = _build_exception(node, built)
+        built[id(node)] = _build_exception(node, unpickled[id(node)], built)
 
     for node in nodes:
         exc = built[id(node)]

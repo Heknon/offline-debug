@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import pickle
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Never
 
 import pytest
 
 from offline_debug import load_traceback, save_traceback
+from tests.helpers import roundtrip
 
 if TYPE_CHECKING:
     import types
+
+    from offline_debug import ExceptionData
 
 
 def get_frames(tb: types.TracebackType | None) -> list[types.FrameType]:
@@ -101,3 +105,71 @@ def test_load_traceback_should_raise_false() -> None:
     loaded_exc = load_traceback(buffer, should_raise=False)
     assert isinstance(loaded_exc, ValueError)
     assert str(loaded_exc) == "test_raise_false"
+
+
+def _raise_on_load() -> Never:
+    msg = "cannot load"
+    raise TypeError(msg)
+
+
+class LoadFailGroup(ExceptionGroup):
+    """Group that pickles fine but whose reconstruction fails at load time."""
+
+    def __reduce__(self) -> tuple:
+        """Reduce to a callable that raises when the pickle is loaded."""
+        return (_raise_on_load, ())
+
+
+def record_rebuilt_exceptions(monkeypatch) -> list[str]:
+    """Record the type name of every exception whose traceback the loader rebuilds."""
+    import offline_debug._inner.load_traceback as load_module
+
+    rebuilt: list[str] = []
+    real_reconstruct_frames = load_module._reconstruct_frames
+
+    def recording(data: ExceptionData) -> types.TracebackType | None:
+        rebuilt.append(type(pickle.loads(data.exc_pickle)).__name__)  # noqa: S301
+        return real_reconstruct_frames(data)
+
+    monkeypatch.setattr(load_module, "_reconstruct_frames", recording)
+    return rebuilt
+
+
+def test_members_of_a_placeholder_group_are_not_rebuilt(monkeypatch) -> None:
+    """
+    A group that loads as the placeholder references none of its members.
+
+    Rebuilding them anyway would create and link a real frame per traceback entry
+    only to drop them, so the loader must not descend into them.
+    """
+    try:
+        raise LoadFailGroup("group", [ValueError("a"), TypeError("b")])
+    except LoadFailGroup as err:
+        original = err
+    rebuilt = record_rebuilt_exceptions(monkeypatch)
+
+    restored = roundtrip(original)
+
+    assert isinstance(restored, RuntimeError)
+    assert "Unpicklable exception LoadFailGroup" in str(restored)
+    assert rebuilt == ["RuntimeError"]
+
+
+def test_placeholder_group_members_reached_by_a_link_are_still_rebuilt(monkeypatch) -> None:
+    """Pruning must not drop a member that something else links to."""
+    try:
+        msg = "a"
+        raise ValueError(msg)
+    except ValueError as member:
+        try:
+            raise LoadFailGroup("group", [member, TypeError("b")])
+        except LoadFailGroup as err:
+            err.__cause__ = member
+            original = err
+    rebuilt = record_rebuilt_exceptions(monkeypatch)
+
+    restored = roundtrip(original)
+
+    assert isinstance(restored, RuntimeError)
+    assert isinstance(restored.__cause__, ValueError)
+    assert sorted(rebuilt) == ["RuntimeError", "ValueError"]

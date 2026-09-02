@@ -20,6 +20,7 @@ import json
 import pickle
 import sys
 from io import BytesIO
+from typing import Never
 
 import pytest
 
@@ -207,6 +208,119 @@ def test_exception_group_member_pointing_back_at_group() -> None:
 
     assert isinstance(restored, ExceptionGroup)
     assert restored.exceptions[0].__cause__ is restored
+
+
+def unwrap_member() -> Never:
+    """``except ExceptionGroup as g: raise g.exceptions[0]``, the common unwrap idiom."""
+    try:
+        try:
+            msg = "inner"
+            raise ValueError(msg)
+        except ValueError as inner:
+            raise ExceptionGroup("group", [inner])  # noqa: B904 - wrapping is the idiom
+    except ExceptionGroup as group:
+        raise group.exceptions[0]  # noqa: B904 - unwrapping is the idiom
+
+
+def unwrapped_member() -> BaseException:
+    """
+    Return what ``unwrap_member`` raises: a member whose ``__context__`` is its own group.
+
+    Raising the member out of the ``except`` block records the group as the member's
+    context while the group still lists the member, so the exception graph's root is a
+    member of a group it links to.
+    """
+    try:
+        unwrap_member()
+    except ValueError as err:
+        member = err
+    else:
+        msg = "unwrap_member() did not raise"
+        raise AssertionError(msg)
+    assert isinstance(member.__context__, ExceptionGroup)
+    assert member.__context__.exceptions[0] is member
+    return member
+
+
+def test_member_raised_out_of_its_group_loads() -> None:
+    """
+    The unwrap idiom must load, with the group rebuilt around the very same member.
+
+    The member is the root, and the loader can only build its group after it -- however
+    the group is reached.
+    """
+    restored = roundtrip(unwrapped_member())
+
+    assert isinstance(restored, ValueError)
+    assert isinstance(restored.__context__, ExceptionGroup)
+    assert restored.__context__.exceptions[0] is restored
+
+
+def test_member_raised_out_of_except_star_loads() -> None:
+    """The ``except*`` form of the unwrap idiom saves the same member-first shape."""
+
+    def unwrap() -> Never:
+        try:
+            msg = "inner"
+            raise ExceptionGroup("group", [ValueError(msg)])
+        except* ValueError as matched:
+            raise matched.exceptions[0]  # noqa: B904 - unwrapping is the idiom
+
+    try:
+        unwrap()
+    except ValueError as err:
+        original = err
+    assert isinstance(original.__context__, ExceptionGroup)
+    assert original.__context__.exceptions[0] is original
+
+    restored = roundtrip(original)
+
+    assert isinstance(restored, ValueError)
+    assert isinstance(restored.__context__, ExceptionGroup)
+    assert restored.__context__.exceptions[0] is restored
+
+
+def test_wrapped_unwrapped_member_loads() -> None:
+    """The member-first shape must load when only a ``raise ... from`` link reaches it."""
+    try:
+        msg = "wrapper"
+        raise RuntimeError(msg) from unwrapped_member()
+    except RuntimeError as err:
+        original = err
+
+    restored = roundtrip(original)
+
+    member = restored.__cause__
+    assert isinstance(member, ValueError)
+    assert isinstance(member.__context__, ExceptionGroup)
+    assert member.__context__.exceptions[0] is member
+
+
+def test_group_reached_through_a_member_link_is_built_after_the_root() -> None:
+    """
+    A link from inside a group's members may lead to a group that contains the root.
+
+    That outer group can only be built once the root is, however the link is found.
+    """
+    try:
+        msg = "member"
+        raise ValueError(msg)
+    except ValueError as member:
+        try:
+            raise ExceptionGroup("inner group", [member])
+        except ExceptionGroup as inner_group:
+            try:
+                raise ExceptionGroup("outer group", [inner_group])
+            except ExceptionGroup as outer_group:
+                member.__cause__ = outer_group
+                original = inner_group
+
+    restored = roundtrip(original)
+
+    assert isinstance(restored, ExceptionGroup)
+    outer = restored.exceptions[0].__cause__
+    assert isinstance(outer, ExceptionGroup)
+    assert outer.exceptions[0] is restored
 
 
 def test_walk_visits_every_node_exactly_once() -> None:

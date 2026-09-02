@@ -9,8 +9,12 @@ from typing import TYPE_CHECKING, Never
 
 import pytest
 
-from offline_debug import load_traceback, save_traceback
-from offline_debug._inner.load_traceback import _MAX_UNITS_PER_ENTRY, _line_only_linetable
+from offline_debug import FrameData, load_traceback, save_traceback
+from offline_debug._inner.load_traceback import (
+    _MAX_UNITS_PER_ENTRY,
+    _location_table,
+    _original_position,
+)
 from tests.helpers import roundtrip
 
 if TYPE_CHECKING:
@@ -109,38 +113,116 @@ def test_load_traceback_should_raise_false() -> None:
 
 
 @pytest.mark.parametrize(
-    ("firstlineno", "lineno"),
+    ("firstlineno", "position"),
     [
-        (1, 1),  # zero delta
-        (10, 12),  # small positive delta: one varint byte
-        (10, 3),  # negative delta: the sign bit
-        (1, 100),  # delta beyond one 6-bit payload: a continuation byte
-        (1, 70_000),  # several continuation bytes
+        (1, (1, 1, None, None)),  # zero delta, no columns
+        (10, (12, 12, None, None)),  # small positive delta: one varint byte
+        (10, (3, 3, None, None)),  # negative delta: the sign bit
+        (1, (100, 100, None, None)),  # delta beyond one 6-bit payload: a continuation byte
+        (1, (70_000, 70_000, None, None)),  # several continuation bytes
+        (1, (1, 1, 0, 0)),  # columns: the zero column must survive the plus-one encoding
+        (5, (8, 8, 4, 20)),  # an ordinary single-line expression
+        (5, (8, 11, 4, 1)),  # a multi-line expression: end line delta, end column below start
+        (10, (3, 3, 100, 250)),  # negative line delta with multi-byte columns
     ],
 )
-def test_line_only_linetable_matches_cpython_decoding(firstlineno: int, lineno: int) -> None:
-    """CPython must decode the hand-built table as "every instruction on ``lineno``"."""
+def test_location_table_matches_cpython_decoding(
+    firstlineno: int, position: tuple[int, int, int | None, int | None]
+) -> None:
+    """CPython must decode the hand-built table as "every instruction at ``position``"."""
     base = compile("", "<synthetic>", "exec")
 
     code = base.replace(
         co_firstlineno=firstlineno,
-        co_linetable=_line_only_linetable(base, firstlineno, lineno),
+        co_linetable=_location_table(base, firstlineno, position),
     )
 
     units = len(code.co_code) // 2
-    assert list(code.co_positions()) == [(lineno, lineno, None, None)] * units
-    assert [line for _, _, line in code.co_lines()] == [lineno]
+    assert list(code.co_positions()) == [position] * units
+    assert [line for _, _, line in code.co_lines()] == [position[0]]
 
 
-def test_line_only_linetable_covers_code_longer_than_one_entry() -> None:
+@pytest.mark.parametrize("position", [(42, 42, None, None), (42, 43, 7, 9)])
+def test_location_table_covers_code_longer_than_one_entry(
+    position: tuple[int, int, int | None, int | None],
+) -> None:
     """A code object needing several entries still maps every instruction."""
     code = compile("\n".join(f"v{i} = {i}" for i in range(20)), "<synthetic>", "exec")
     units = len(code.co_code) // 2
     assert units > _MAX_UNITS_PER_ENTRY
 
-    code = code.replace(co_linetable=_line_only_linetable(code, code.co_firstlineno, 42))
+    code = code.replace(co_linetable=_location_table(code, code.co_firstlineno, position))
 
-    assert list(code.co_positions()) == [(42, 42, None, None)] * units
+    assert list(code.co_positions()) == [position] * units
+
+
+def _frame_data(lasti: int, lineno: int) -> FrameData:
+    """Build the parts of a ``FrameData`` that ``_original_position`` reads."""
+    return FrameData(code=b"", globals={}, locals={}, lasti=lasti, lineno=lineno, stack_depth=1)
+
+
+def _divide(numerator: int, denominator: int) -> float:
+    return numerator / denominator
+
+
+def _failing_instruction() -> tuple[types.CodeType, int, int]:
+    """Return ``_divide``'s code with the ``lasti`` and line of its division."""
+    try:
+        _divide(1, 0)
+    except ZeroDivisionError as err:
+        tb = err.__traceback__
+        assert tb is not None
+        tb = tb.tb_next
+        assert tb is not None
+        return tb.tb_frame.f_code, tb.tb_lasti, tb.tb_lineno
+    msg = "_divide() did not raise"
+    raise AssertionError(msg)
+
+
+def test_original_position_recovers_the_columns_of_the_failing_instruction() -> None:
+    """The saved ``lasti`` picks the original instruction, columns included."""
+    code, lasti, lineno = _failing_instruction()
+    source = "    return numerator / denominator"
+
+    line, end_line, col, end_col = _original_position(code, _frame_data(lasti, lineno))
+
+    assert (line, end_line) == (lineno, lineno)
+    assert source[col:end_col] == "numerator / denominator"
+
+
+@pytest.mark.parametrize("lasti", [-1, 10_000])
+def test_original_position_falls_back_for_an_unusable_offset(lasti: int) -> None:
+    """An offset the original bytecode cannot resolve yields the line alone."""
+    code, _, lineno = _failing_instruction()
+
+    assert _original_position(code, _frame_data(lasti, lineno)) == (lineno, lineno, None, None)
+
+
+def test_original_position_falls_back_when_the_instruction_has_no_columns() -> None:
+    """Code without column information (``-X no_debug_ranges``) yields the line alone."""
+    code, lasti, lineno = _failing_instruction()
+    columnless = code.replace(
+        co_linetable=_location_table(code, code.co_firstlineno, (lineno, lineno, None, None))
+    )
+
+    assert _original_position(columnless, _frame_data(lasti, lineno)) == (
+        lineno,
+        lineno,
+        None,
+        None,
+    )
+
+
+def test_original_position_falls_back_when_the_line_disagrees() -> None:
+    """A position on another line than the one recorded is not trusted."""
+    code, lasti, lineno = _failing_instruction()
+
+    assert _original_position(code, _frame_data(lasti, lineno + 1)) == (
+        lineno + 1,
+        lineno + 1,
+        None,
+        None,
+    )
 
 
 def _raise_on_load() -> Never:

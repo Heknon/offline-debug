@@ -109,7 +109,7 @@ whose C recursion limit is lower; past it `save_traceback` raises `RecursionErro
 The on-disk layout gained one optional field in 0.4.0 (`suppress_context`, defaulting to
 `False`); nothing was removed or renamed. Dumps written by earlier versions load, raise and
 print normally, and they gain the traceback-formatting fix, having previously failed to format
-at all.
+at all -- caret markers included, since the instruction offset those need was always recorded.
 
 What an old dump cannot gain is anything the writer never recorded: it stored a separate copy
 of every shared exception, and no `suppress_context` at all. So it still expands to more nodes
@@ -125,11 +125,12 @@ not one whose graph genuinely contains a cycle (`raise e from e`): the pre-0.4.0
 
 - **True Frame Reconstruction**: Uses `ctypes` to call `PyFrame_New` from the Python C API. This creates real `frame` objects
   which are required for a valid `types.TracebackType`.
-- **Line-level Position Fidelity**: Reconstructed frames carry a synthetic code object (real optimized
-  bytecode would segfault on `f_locals` access) whose location table maps every instruction to the
-  restored line with no column information. Tracebacks print with correct files, lines and functions
-  from every printer, and `frame.f_lineno` is accurate; the `^^^^` column markers are not available
-  for reconstructed frames.
+- **Position Fidelity**: Reconstructed frames carry a synthetic code object (real optimized bytecode
+  would segfault on `f_locals` access) whose location table maps every instruction to the position of
+  the original failing instruction: its line and, when the original code recorded them, its columns.
+  Tracebacks print with correct files, lines and functions from every printer, `frame.f_lineno` is
+  accurate, and the `^^^^` markers under the failing expression match the original's. Only code that
+  carried no column information (e.g. run with `-X no_debug_ranges`) maps to its line alone.
 - **Python 3.13 Compatibility**: Leverages PEP 667 features where `f_locals` is a write-through proxy, allowing for accurate local
   variable restoration.
 - **Support python 3.12 as well**

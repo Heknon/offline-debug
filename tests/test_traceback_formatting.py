@@ -11,9 +11,10 @@ surfaced as ``RuntimeError: generator raised StopIteration`` from *any* attempt
 to format a loaded exception -- the library's central promise.
 
 Reconstructed frames now carry a location table that maps every synthetic
-instruction to the restored line without columns, so every printer -- the
-``traceback`` module and the C printer behind the default excepthook alike --
-shows the right line and draws no caret markers.
+instruction to the position of the original failing instruction -- its line
+and, when the original code recorded them, its columns -- so every printer, the
+``traceback`` module and the C printer behind the default excepthook alike,
+shows the right line and draws the same ``^^^^`` markers as for the original.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import pickle
 import sys
 import traceback
 from io import BytesIO
+from itertools import islice
 from typing import TYPE_CHECKING, Never
 
 from offline_debug import ExceptionData, load_traceback
@@ -110,24 +112,99 @@ def test_loaded_frames_report_source_lines() -> None:
     assert "raise ValueError(str(local_value))" in text
 
 
-def test_loaded_frames_carry_line_only_positions() -> None:
-    """
-    Reconstructed code objects map every instruction to the restored line, columnless.
+def original_entries(exc: BaseException) -> list[TracebackType]:
+    """Return every traceback entry of an exception that was never saved."""
+    entries: list[TracebackType] = []
+    tb = exc.__traceback__
+    while tb is not None:
+        entries.append(tb)
+        tb = tb.tb_next
+    return entries
 
-    That is what makes the stdlib formatter, ``frame.f_lineno`` and ``tb_lineno`` agree
-    while no printer has columns to draw ``^^^^`` markers from.
+
+def instruction_position(
+    tb: TracebackType,
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Return the source position of the instruction a traceback entry points at."""
+    return next(islice(tb.tb_frame.f_code.co_positions(), tb.tb_lasti // 2, None))
+
+
+def test_loaded_frames_carry_the_original_positions() -> None:
+    """
+    Reconstructed code objects map every instruction to the original failing position.
+
+    That is what makes the stdlib formatter, ``frame.f_lineno`` and ``tb_lineno`` agree,
+    and gives every printer the columns to draw the same ``^^^^`` markers as the original.
     """
     original = make_error()
-    expected = positions(original)
+    expected = original_entries(original)
     restored = roundtrip(original)
 
     entries = reconstructed_entries(restored, len(expected))
 
-    for tb, (_, lineno, _) in zip(entries, expected, strict=True):
+    for tb, original_tb in zip(entries, expected, strict=True):
+        position = instruction_position(original_tb)
+        assert position[2] is not None, "the fixture must carry column information"
         assert tb.tb_lasti >= 0
-        assert tb.tb_lineno == lineno
-        assert tb.tb_frame.f_lineno == lineno
-        assert set(tb.tb_frame.f_code.co_positions()) == {(lineno, lineno, None, None)}
+        assert tb.tb_lineno == original_tb.tb_lineno
+        assert tb.tb_frame.f_lineno == original_tb.tb_lineno
+        assert set(tb.tb_frame.f_code.co_positions()) == {position}
+
+
+def divide(numerator: int, denominator: int) -> float:
+    """Fail inside a sub-expression, which native tracebacks mark with carets."""
+    return numerator / denominator + 1
+
+
+def compute() -> float:
+    """Call ``divide`` from inside a larger expression, so the call site gets carets too."""
+    return 3 + divide(1, 0)
+
+
+def make_caret_error() -> BaseException:
+    """Return a ZeroDivisionError whose native traceback draws caret lines."""
+    try:
+        compute()
+    except ZeroDivisionError as err:
+        return err
+    msg = "compute() did not raise"
+    raise AssertionError(msg)
+
+
+def frames_of(text: str) -> str:
+    """Drop the header line, leaving the frames and the final exception line."""
+    header = "Traceback (most recent call last):\n"
+    assert text.startswith(header)
+    return text.removeprefix(header)
+
+
+def test_loaded_frames_print_the_same_carets_as_the_original() -> None:
+    """
+    The ``traceback`` module must mark the failing expression exactly as it did natively.
+
+    The loaded traceback is the original one spliced onto the loader's own frames, so
+    the original's rendering must be a suffix of the loaded one, caret lines included.
+    """
+    original = make_caret_error()
+    native = formatted(original)
+    assert "^" in native, "the fixture must produce caret lines natively"
+
+    restored = roundtrip(original)
+
+    assert formatted(restored).endswith(frames_of(native))
+
+
+def test_default_excepthook_prints_the_same_carets_as_the_original(capsys) -> None:
+    """The C printer behind the default excepthook must draw the same carets too."""
+    original = make_caret_error()
+    sys.__excepthook__(type(original), original, original.__traceback__)
+    native = capsys.readouterr().err
+    assert "^" in native, "the fixture must produce caret lines natively"
+
+    restored = roundtrip(original)
+    sys.__excepthook__(type(restored), restored, restored.__traceback__)
+
+    assert capsys.readouterr().err.endswith(frames_of(native))
 
 
 def test_default_excepthook_prints_no_caret_lines(capsys) -> None:

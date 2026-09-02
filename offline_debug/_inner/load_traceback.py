@@ -5,6 +5,7 @@ import pickle
 import sys
 import types
 from io import BytesIO
+from itertools import islice
 from pathlib import Path
 from types import CodeType
 
@@ -21,18 +22,21 @@ from offline_debug._inner.models import (
 
 # Instruction offset every reconstructed traceback entry points at. The synthetic code
 # object built in ``_reconstruct_frames`` maps *all* of its instructions to the restored
-# line, so any offset would resolve to the same position; the first one is always valid.
+# position, so any offset would resolve to the same one; the first is always valid.
 _SYNTHETIC_LASTI = 0
 
 # ``co_linetable`` encoding (``Objects/locations.md`` in CPython): a sequence of entries,
 # each a header byte ``0b1_CCCC_LLL`` -- location code ``CCCC`` covering ``LLL + 1`` code
 # units -- followed by code-specific varints. Code 13 is "line only, no columns", followed
 # by one signed varint holding the line delta from the previous entry, which for the
-# first entry is relative to ``co_firstlineno``. Varints carry 6 payload bits per byte,
-# least significant first, with bit 6 set on every byte but the last; signed values put
-# the sign in the low bit and the magnitude above it.
+# first entry is relative to ``co_firstlineno``. Code 14 is the long form: the same line
+# delta, then the end line as an unsigned delta from that line, then the start and end
+# columns, each stored plus one so that zero can mean "no column". Varints carry 6
+# payload bits per byte, least significant first, with bit 6 set on every byte but the
+# last; signed values put the sign in the low bit and the magnitude above it.
 _ENTRY_HEADER_FLAG = 0x80
 _NO_COLUMNS_LOCATION_CODE = 13
+_LONG_LOCATION_CODE = 14
 _MAX_UNITS_PER_ENTRY = 8
 _CODE_UNIT_SIZE = 2
 _VARINT_PAYLOAD_BITS = 6
@@ -55,23 +59,65 @@ def _signed_varint(value: int) -> bytes:
     return _varint(((-value) << 1) | 1 if value < 0 else value << 1)
 
 
-def _line_only_linetable(code: CodeType, firstlineno: int, lineno: int) -> bytes:
+# A source position as ``co_positions()`` reports it: start line, end line, and the
+# start and end columns, which are ``None`` when the code carries no column information.
+_Position = tuple[int, int, int | None, int | None]
+
+
+def _location_table(code: CodeType, firstlineno: int, position: _Position) -> bytes:
     """
-    Build a ``co_linetable`` placing every instruction of ``code`` on ``lineno``, columnless.
+    Build a ``co_linetable`` placing every instruction of ``code`` at ``position``.
 
     ``firstlineno`` is the ``co_firstlineno`` the table will be paired with, since the
-    first entry's line is stored relative to it.
+    first entry's line is stored relative to it. A position without columns produces
+    line-only entries; one with columns produces long-form entries, which is what lets
+    the traceback printers draw ``^^^^`` markers under the failing expression.
     """
+    lineno, end_lineno, col, end_col = position
     units = len(code.co_code) // _CODE_UNIT_SIZE
     delta = lineno - firstlineno
     table = bytearray()
     while units > 0:
         run = min(units, _MAX_UNITS_PER_ENTRY)
-        table.append(_ENTRY_HEADER_FLAG | (_NO_COLUMNS_LOCATION_CODE << 3) | (run - 1))
-        table += _signed_varint(delta)
+        if col is None or end_col is None:
+            table.append(_ENTRY_HEADER_FLAG | (_NO_COLUMNS_LOCATION_CODE << 3) | (run - 1))
+            table += _signed_varint(delta)
+        else:
+            table.append(_ENTRY_HEADER_FLAG | (_LONG_LOCATION_CODE << 3) | (run - 1))
+            table += _signed_varint(delta)
+            table += _varint(end_lineno - lineno) + _varint(col + 1) + _varint(end_col + 1)
         delta = 0
         units -= run
     return bytes(table)
+
+
+def _original_position(code: CodeType, f_data: FrameData) -> _Position:
+    """
+    Return the source position of the instruction the original traceback entry pointed at.
+
+    ``FrameData.lasti`` indexes the original bytecode, and the original code object still
+    carries its location table, so the failing expression's columns are recoverable even
+    though the reconstructed frame runs synthetic bytecode. Falls back to the restored
+    line alone, columnless, when the dump gives nothing usable: a negative or out-of-range
+    offset, an instruction without column information (for example under
+    ``-X no_debug_ranges``), or a position that disagrees with the recorded line.
+    """
+    line_only: _Position = (f_data.lineno, f_data.lineno, None, None)
+    if f_data.lasti < 0:
+        return line_only
+    position = next(islice(code.co_positions(), f_data.lasti // _CODE_UNIT_SIZE, None), None)
+    if position is None:
+        return line_only
+    line, end_line, col, end_col = position
+    if (
+        line != f_data.lineno
+        or end_line is None
+        or end_line < line
+        or col is None
+        or end_col is None
+    ):
+        return line_only
+    return (line, end_line, col, end_col)
 
 
 def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
@@ -107,11 +153,14 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
             co_qualname=code.co_qualname,
             # The synthetic bytecode has nothing to do with the original, so its own
             # location table (an empty module: line 1, columns 0-0) would put the frame
-            # on the wrong line and draw a bogus caret. Map all of it to the restored
-            # line with no columns instead: the stdlib then prints the right line,
-            # ``frame.f_lineno`` answers correctly, and neither the ``traceback`` module
-            # nor the C printer behind the default excepthook draws ``^^^^`` markers.
-            co_linetable=_line_only_linetable(unoptimized_code, code.co_firstlineno, f_data.lineno),
+            # on the wrong line and draw a bogus caret. Map all of it to the position of
+            # the original failing instruction instead: the stdlib then prints the right
+            # line, ``frame.f_lineno`` answers correctly, and both the ``traceback``
+            # module and the C printer behind the default excepthook draw the same
+            # ``^^^^`` markers they would for the original exception.
+            co_linetable=_location_table(
+                unoptimized_code, code.co_firstlineno, _original_position(code, f_data)
+            ),
         )
 
         # PyFrame_New returns a new reference to a PyFrameObject.
@@ -134,7 +183,7 @@ def _reconstruct_frames(data: ExceptionData) -> types.TracebackType | None:
             tb_next=tb_next,
             tb_frame=frame,
             # The original ``lasti`` indexes into the original bytecode, not the synthetic
-            # one above; ``FrameData.lasti`` stays in the dump as original metadata.
+            # one above; it was consumed by ``_original_position`` instead.
             tb_lasti=_SYNTHETIC_LASTI,
             tb_lineno=f_data.lineno,
         )

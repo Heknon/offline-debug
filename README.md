@@ -100,8 +100,9 @@ payload = [
 
 Chains are walked iteratively, so `sys.getrecursionlimit()` does not bound them. The dump itself
 does have a ceiling: it nests every node inside the node that links to it, and pickling that
-nesting is recursive at the C level, so a `__cause__`/`__context__` chain of roughly 3,000 links
-is the practical maximum, past which `save_traceback` raises `RecursionError`.
+nesting is recursive at the C level, with a platform-dependent limit. A `__cause__`/`__context__`
+chain of roughly 3,000 links is the practical maximum on Linux, and fewer than 1,500 on Windows,
+whose C recursion limit is lower; past it `save_traceback` raises `RecursionError`.
 
 ### Dump Compatibility
 

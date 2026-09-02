@@ -35,10 +35,12 @@ from offline_debug import (
 from tests.helpers import roundtrip
 
 MAX_NODES_PER_LINK = 2
-# Above the default recursion limit, which the pre-0.4.0 recursive walk could not get past,
-# and below the ceiling the dump's nesting imposes on pickle (see the ``save_traceback``
-# docstring), so the round trip is exercised well past the old failure point.
-DEEP_CHAIN_LINKS = 1500
+# The deep-chain round trip runs under this recursion limit, so that anything recursive
+# on the save or load path fails long before the chain ends, while the chain itself
+# stays well inside the ceiling pickle puts on the nested dump. That ceiling is lowest on
+# Windows, where 1500 links already exceed it (see the ``save_traceback`` docstring).
+LOWERED_RECURSION_LIMIT = 200
+DEEP_CHAIN_LINKS = 400
 
 
 def self_caused() -> BaseException:
@@ -158,10 +160,11 @@ def test_deep_chain_round_trips_past_the_recursion_limit() -> None:
     """
     A long but acyclic cause chain must round-trip well past the interpreter's limit.
 
-    The remaining bound is pickle's, on the depth of the nested dump, and lies far above
-    the limit set here (see the ``save_traceback`` docstring).
+    The remaining bound is pickle's, on the depth of the nested dump, and lies above the
+    chain length used here on every supported platform (see the ``save_traceback``
+    docstring).
     """
-    assert sys.getrecursionlimit() < DEEP_CHAIN_LINKS
+    assert LOWERED_RECURSION_LIMIT < DEEP_CHAIN_LINKS
     deepest: BaseException = ValueError("root")
     for i in range(DEEP_CHAIN_LINKS):
         nxt = RuntimeError(f"lvl{i}")
@@ -169,7 +172,7 @@ def test_deep_chain_round_trips_past_the_recursion_limit() -> None:
         deepest = nxt
 
     original_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(200)
+    sys.setrecursionlimit(LOWERED_RECURSION_LIMIT)
     try:
         restored = roundtrip(deepest)
     finally:
@@ -404,7 +407,7 @@ def test_walk_is_not_recursion_bound() -> None:
     data = parse_traceback(buffer)
 
     original_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(200)
+    sys.setrecursionlimit(LOWERED_RECURSION_LIMIT)
     try:
         count = sum(1 for _ in walk_exception_data(data))
     finally:

@@ -28,6 +28,7 @@ To get started, install with:
 `pip install offline-debug` or `uv add offline-debug`
 
 ```python
+import marshal
 from pathlib import Path
 from offline_debug import save_traceback, load_traceback, parse_traceback
 
@@ -45,7 +46,9 @@ load_traceback(Path("crash_report.dump"))
 data = parse_traceback(Path("crash_report.dump"))
 print(f"Number of frames: {len(data.tb_frames)}")
 for frame in data.tb_frames:
-    print(f"File: {frame.code.co_filename}, Line: {frame.lineno}")
+    # FrameData.code holds the marshaled code object
+    code = marshal.loads(frame.code)
+    print(f"File: {code.co_filename}, Line: {frame.lineno}")
 ```
 
 ### Exception Group Support

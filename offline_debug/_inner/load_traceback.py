@@ -20,9 +20,9 @@ from offline_debug._inner.models import (
 )
 
 
-def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+def _reconstruct_traceback(data: ExceptionData) -> types.TracebackType | None:
     """
-    Recursively reconstruct an exception from its serialized data.
+    Reconstruct one exception's traceback frames.
 
     Note on Python Locals:
     Python uses two ways to store local variables:
@@ -33,21 +33,6 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
     During reconstruction, we must explicitly synchronize these because PyFrame_New
     does not automatically populate the "fast" locals array from a dictionary.
     """
-    exc: BaseException = pickle.loads(data.exc_pickle)  # noqa: S301
-    if not isinstance(exc, BaseException):
-        msg = f"Expected BaseException, but got {type(exc).__name__}"
-        raise TypeError(msg)
-
-    if isinstance(data, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
-        inner_excs = [_reconstruct_exc_data(e) for e in data.exceptions]
-        # The exceptions inside the unpickled exc object have incomplete data, so
-        # rebuild the group around the fully reconstructed ones. We must not use
-        # derive() for this: its default implementation returns a plain
-        # ExceptionGroup, dropping the subclass type and its custom state.
-        exc = reconstruct_exception_group(
-            type(exc), exc.message, tuple(inner_excs), exc.__dict__.copy() or None
-        )
-
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:
         code: CodeType = marshal.loads(f_data.code)  # noqa: S302
@@ -92,14 +77,63 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
         )
         tb_next = tb
 
-    exc = exc.with_traceback(tb_next)
+    return tb_next
 
-    if data.cause:
-        exc.__cause__ = _reconstruct_exc_data(data.cause)
-    if data.context:
-        exc.__context__ = _reconstruct_exc_data(data.context)
 
-    return exc
+def _exception_nodes(data: ExceptionData) -> list[ExceptionData]:
+    """Return each node in an exception graph once."""
+    nodes: list[ExceptionData] = []
+    seen: set[int] = set()
+    pending = [data]
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        nodes.append(node)
+        pending.extend(edge for edge in (node.cause, node.context) if edge is not None)
+        if isinstance(node, ExceptionGroupData):
+            pending.extend(node.exceptions)
+    return nodes
+
+
+def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
+    """Reconstruct an exception graph, preserving cycles and shared nodes."""
+    nodes = _exception_nodes(data)
+    built: dict[int, BaseException] = {}
+
+    def build(node: ExceptionData) -> BaseException:
+        existing = built.get(id(node))
+        if existing is not None:
+            return existing
+
+        exc = pickle.loads(node.exc_pickle)  # noqa: S301
+        if not isinstance(exc, BaseException):
+            msg = f"Expected BaseException, but got {type(exc).__name__}"
+            raise TypeError(msg)
+
+        if isinstance(node, ExceptionGroupData) and isinstance(exc, BaseExceptionGroup):
+            members = tuple(build(member) for member in node.exceptions)
+            # derive() may discard an exception-group subclass and its custom state.
+            exc = reconstruct_exception_group(
+                type(exc), exc.message, members, exc.__dict__.copy() or None
+            )
+
+        exc = exc.with_traceback(_reconstruct_traceback(node))
+        built[id(node)] = exc
+        return exc
+
+    for node in nodes:
+        build(node)
+
+    for node in nodes:
+        exc = built[id(node)]
+        if node.cause is not None:
+            exc.__cause__ = built[id(node.cause)]
+        if node.context is not None:
+            exc.__context__ = built[id(node.context)]
+
+    return built[id(data)]
 
 
 def parse_traceback(file: Path | BytesIO) -> ExceptionData:

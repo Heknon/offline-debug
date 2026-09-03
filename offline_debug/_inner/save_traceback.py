@@ -61,7 +61,38 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
 def _serialize_exc_data(
     exc: BaseException, roundtrip_cache: dict[int, str | None]
 ) -> ExceptionData:
-    """Recursively serialize exception data into dataclasses."""
+    """Serialize an exception graph, preserving cycles and shared nodes."""
+    memo: dict[int, ExceptionData] = {}
+    pending: list[BaseException] = []
+
+    def node_for(current: BaseException) -> ExceptionData:
+        node = memo.get(id(current))
+        if node is not None:
+            return node
+
+        node = _serialize_exception(current, roundtrip_cache)
+        memo[id(current)] = node
+        pending.append(current)
+        return node
+
+    root = node_for(exc)
+    while pending:
+        current = pending.pop()
+        node = memo[id(current)]
+        if current.__cause__ is not None:
+            node.cause = node_for(current.__cause__)
+        if current.__context__ is not None:
+            node.context = node_for(current.__context__)
+        if isinstance(current, BaseExceptionGroup) and isinstance(node, ExceptionGroupData):
+            node.exceptions = [node_for(member) for member in current.exceptions]
+
+    return root
+
+
+def _serialize_exception(
+    exc: BaseException, roundtrip_cache: dict[int, str | None]
+) -> ExceptionData:
+    """Serialize one exception without following graph edges."""
     tb_frames: list[FrameData] = []
     curr_tb = exc.__traceback__
     while curr_tb:
@@ -100,24 +131,14 @@ def _serialize_exc_data(
             RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
         )
 
-    cause = _serialize_exc_data(exc.__cause__, roundtrip_cache) if exc.__cause__ else None
-    context = _serialize_exc_data(exc.__context__, roundtrip_cache) if exc.__context__ else None
-
     if isinstance(exc, BaseExceptionGroup):
         return ExceptionGroupData(
             exc_pickle=exc_pickle,
             tb_frames=tb_frames,
-            cause=cause,
-            context=context,
-            exceptions=[_serialize_exc_data(e, roundtrip_cache) for e in exc.exceptions],
+            exceptions=[],
         )
 
-    return ExceptionData(
-        exc_pickle=exc_pickle,
-        tb_frames=tb_frames,
-        cause=cause,
-        context=context,
-    )
+    return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
 
 
 def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:

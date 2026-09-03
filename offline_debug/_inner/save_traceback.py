@@ -135,9 +135,13 @@ def _serialize_exception(
         return ExceptionGroupData(
             exc_pickle=exc_pickle,
             tb_frames=tb_frames,
+            # This node is memoized before its edges are followed; the worklist in
+            # _serialize_exc_data fills every group member before returning it.
             exceptions=[],
         )
 
+    # cause and context start as None only while this node is being memoized. The
+    # worklist in _serialize_exc_data fills both links before returning the graph.
     return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
 
 

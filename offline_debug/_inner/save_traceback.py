@@ -8,9 +8,10 @@ from io import BytesIO
 from pathlib import Path
 
 from offline_debug._inner._pickle_helpers import (
-    ProxyTypes,
+    ProxyMatcher,
     exception_safe_dump,
     exception_safe_dumps,
+    proxy_matcher,
     proxy_placeholder,
 )
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
@@ -58,7 +59,7 @@ def _get_stack_depth(frame: types.FrameType) -> int:
     return depth
 
 
-def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None], proxy_types: ProxyTypes) -> dict:
+def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None], is_proxy: ProxyMatcher) -> dict:
     """
     Filter dictionary to include only items that survive a pickle round-trip.
 
@@ -77,7 +78,7 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None], proxy_types: P
         if k in _INTERNAL_ATTRIBUTES_TO_SKIP:
             continue
         cache_key = id(v)
-        if cache_key not in roundtrip_cache and proxy_types.matches(v):
+        if cache_key not in roundtrip_cache and is_proxy(v):
             roundtrip_cache[cache_key] = proxy_placeholder(v)
         if cache_key not in roundtrip_cache:
             try:
@@ -88,7 +89,7 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None], proxy_types: P
                 # Such values would otherwise break the entire load, so we replace
                 # them with a placeholder. We use the same pickler that serializes
                 # these dicts so the check reflects what will actually be written.
-                pickle.loads(exception_safe_dumps(v, proxy_types))  # noqa: S301
+                pickle.loads(exception_safe_dumps(v, is_proxy))  # noqa: S301
                 roundtrip_cache[cache_key] = None
             except BaseException:  # noqa: BLE001 - even a KeyboardInterrupt raised by a
                 # value's reconstruction must not abort capturing the traceback.
@@ -99,7 +100,7 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None], proxy_types: P
 
 
 def _serialize_exc_data(
-    exc: BaseException, roundtrip_cache: dict[int, str | None], proxy_types: ProxyTypes
+    exc: BaseException, roundtrip_cache: dict[int, str | None], is_proxy: ProxyMatcher
 ) -> ExceptionData:
     """Serialize an exception graph, preserving cycles and shared nodes."""
     memo: dict[int, ExceptionData] = {}
@@ -110,7 +111,7 @@ def _serialize_exc_data(
         if node is not None:
             return node
 
-        node = _serialize_exception(current, roundtrip_cache, proxy_types)
+        node = _serialize_exception(current, roundtrip_cache, is_proxy)
         memo[id(current)] = node
         pending.append(current)
         return node
@@ -130,7 +131,7 @@ def _serialize_exc_data(
 
 
 def _serialize_exception(
-    exc: BaseException, roundtrip_cache: dict[int, str | None], proxy_types: ProxyTypes
+    exc: BaseException, roundtrip_cache: dict[int, str | None], is_proxy: ProxyMatcher
 ) -> ExceptionData:
     """Serialize one exception without following graph edges."""
     tb_frames: list[FrameData] = []
@@ -150,8 +151,8 @@ def _serialize_exception(
         tb_frames.append(
             FrameData(
                 code=marshal.dumps(f.f_code),
-                globals=_filter_dict(f.f_globals, roundtrip_cache, proxy_types),
-                locals=_filter_dict(f.f_locals, roundtrip_cache, proxy_types),
+                globals=_filter_dict(f.f_globals, roundtrip_cache, is_proxy),
+                locals=_filter_dict(f.f_locals, roundtrip_cache, is_proxy),
                 lasti=curr_tb.tb_lasti,
                 lineno=curr_tb.tb_lineno,
                 stack_depth=_get_stack_depth(f),
@@ -161,7 +162,7 @@ def _serialize_exception(
         curr_tb = curr_tb.tb_next
 
     try:
-        exc_pickle = exception_safe_dumps(exc, proxy_types)
+        exc_pickle = exception_safe_dumps(exc, is_proxy)
         # A dump that cannot be loaded later is worse than a placeholder, so also
         # verify the exception survives loading (e.g. a custom __reduce__ whose
         # reconstruction fails only at load time).
@@ -203,16 +204,16 @@ def save_traceback(
     so a proxy family can be named without importing its package; either form
     also matches subclasses. Defaults to :data:`DEFAULT_PROXY_TYPES`.
     """
-    proxies = ProxyTypes(proxy_types)
-    data = _serialize_exc_data(exc, roundtrip_cache={}, proxy_types=proxies)
+    is_proxy = proxy_matcher(proxy_types)
+    data = _serialize_exc_data(exc, roundtrip_cache={}, is_proxy=is_proxy)
     if file is None:
         return data
 
     if isinstance(file, Path):
         with file.open("wb") as f:
-            exception_safe_dump(data, f, proxies)
+            exception_safe_dump(data, f, is_proxy)
     elif isinstance(file, BytesIO):
-        exception_safe_dump(data, file, proxies)
+        exception_safe_dump(data, file, is_proxy)
     else:
         msg = f"Unexpected type for file {type(file).__name__}"
         raise TypeError(msg)

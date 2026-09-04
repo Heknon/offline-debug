@@ -37,6 +37,7 @@ import contextlib
 import io
 import pickle
 import types
+from collections.abc import Iterable
 from typing import IO, Any
 
 # Pickle protocol hooks that let a class control its own serialization.
@@ -71,6 +72,60 @@ def _has_python_constructor(cls: type[BaseException]) -> bool:
     return isinstance(cls.__init__, types.FunctionType) or isinstance(
         cls.__new__, types.FunctionType
     )
+
+
+class ProxyTypes:
+    """
+    The classes whose instances must never be touched during a save.
+
+    A proxy such as an ``rpyc`` netref forwards *every* instance operation to a
+    remote peer: reading an attribute, ``repr``, ``str``, ``hash``, ``isinstance``
+    (through ``__class__``) and pickling (through ``__reduce_ex__``). Each is a
+    synchronous request that, on a broken connection, blocks for the peer's full
+    timeout - and the save only ever wants to note that the value was there. So
+    such a value is recognised from its *type alone* and replaced by a placeholder
+    before anything looks at the instance.
+
+    An entry is a class, or the fully-qualified name of one such as
+    ``"rpyc.core.netref.BaseNetref"``. Names let a caller guard against a
+    package it does not import itself. Either form matches an instance of the
+    class or of any subclass, since only ``type(value).__mro__`` is consulted -
+    the one thing guaranteed local for every object.
+    """
+
+    __slots__ = ("_classes", "_names")
+
+    def __init__(self, entries: Iterable[type | str] = ()) -> None:
+        classes: set[type] = set()
+        names: set[str] = set()
+        for entry in entries:
+            if isinstance(entry, type):
+                classes.add(entry)
+            elif isinstance(entry, str):
+                names.add(entry)
+            else:
+                msg = (
+                    "proxy_types entries must be classes or fully-qualified class names, "
+                    f"got {type(entry).__name__}"
+                )
+                raise TypeError(msg)
+        self._classes = frozenset(classes)
+        self._names = frozenset(names)
+
+    def matches(self, value: object) -> bool:
+        """Whether ``value`` is an instance of a registered proxy class, by type only."""
+        if not self._classes and not self._names:
+            return False
+        return any(
+            cls in self._classes or f"{cls.__module__}.{cls.__qualname__}" in self._names
+            for cls in type(value).__mro__
+        )
+
+
+def proxy_placeholder(value: object) -> str:
+    """Describe a proxy from local facts only: its class and its identity."""
+    cls = type(value)
+    return f"<proxy {cls.__module__}.{cls.__qualname__} at 0x{id(value):x}>"
 
 
 def reconstruct_exception(
@@ -112,11 +167,26 @@ def reconstruct_exception_group(
 
 
 class CustomExceptionPickler(pickle.Pickler):
-    """Pickler that takes over reconstruction of constructor-rejecting exceptions."""
+    """
+    Pickler that takes over reconstruction of constructor-rejecting exceptions.
+
+    It also stands in for registered proxies (see :class:`ProxyTypes`): wherever
+    one appears - a frame variable, an item nested in a container, an exception's
+    ``args`` or attributes - it is written as a placeholder string instead of
+    being asked how to pickle itself, which for a proxy is a remote call.
+    """
+
+    def __init__(self, file: IO[bytes], proxy_types: ProxyTypes | None = None) -> None:
+        super().__init__(file)
+        self._proxy_types = proxy_types or ProxyTypes()
 
     # The inline suppression below is needed because this returns NotImplemented to
     # fall back to default reduction, which the stdlib stub's return type omits.
     def reducer_override(self, obj: object, /) -> object:  # ty: ignore[invalid-method-override]
+        # Proxies first: even the isinstance() below can reach the peer through
+        # a proxy's __class__, so nothing may touch the instance before this.
+        if self._proxy_types.matches(obj):
+            return str, (proxy_placeholder(obj),)
         if not isinstance(obj, BaseException):
             return NotImplemented
         cls = type(obj)
@@ -132,13 +202,15 @@ class CustomExceptionPickler(pickle.Pickler):
         return reconstruct_exception, (cls, obj.args, state)
 
 
-def exception_safe_dump(obj: object, file: IO[bytes]) -> None:
+def exception_safe_dump(
+    obj: object, file: IO[bytes], proxy_types: ProxyTypes | None = None
+) -> None:
     """Serialize ``obj`` to an open binary ``file`` using :class:`CustomExceptionPickler`."""
-    CustomExceptionPickler(file).dump(obj)
+    CustomExceptionPickler(file, proxy_types).dump(obj)
 
 
-def exception_safe_dumps(obj: object) -> bytes:
+def exception_safe_dumps(obj: object, proxy_types: ProxyTypes | None = None) -> bytes:
     """Serialize ``obj`` to bytes using :class:`CustomExceptionPickler`."""
     buf = io.BytesIO()
-    exception_safe_dump(obj, buf)
+    exception_safe_dump(obj, buf, proxy_types)
     return buf.getvalue()

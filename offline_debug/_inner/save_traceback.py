@@ -1,12 +1,13 @@
 """Save traceback to a file."""
 
+import contextlib
 import marshal
 import pickle
 import types
 from io import BytesIO
 from pathlib import Path
 
-from offline_debug._inner._pickle_helpers import exception_safe_dump, exception_safe_dumps
+from offline_debug._inner._pickle_helpers import placeholder, resilient_dump, resilient_dumps
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
@@ -41,21 +42,34 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
         cache_key = id(v)
         if cache_key not in roundtrip_cache:
             try:
-                # We must verify that the value survives a full pickle round-trip
-                # because many globals (like open file handles, database connections,
-                # or modules) cannot be saved to disk, and some values pickle but fail
-                # to unpickle (e.g. a custom __reduce__ whose callable raises on load).
-                # Such values would otherwise break the entire load, so we replace
-                # them with a placeholder. We use the same pickler that serializes
-                # these dicts so the check reflects what will actually be written.
-                pickle.loads(exception_safe_dumps(v))  # noqa: S301
+                # The pickler already degrades what it cannot pickle to placeholders,
+                # but some values pickle and then fail to unpickle (e.g. a custom
+                # __reduce__ whose callable raises on load). Such values would break
+                # the entire load, so verify the full round-trip with the same
+                # pickler that serializes these dicts.
+                pickle.loads(resilient_dumps(v))  # noqa: S301
                 roundtrip_cache[cache_key] = None
             except BaseException:  # noqa: BLE001 - even a KeyboardInterrupt raised by a
                 # value's reconstruction must not abort capturing the traceback.
-                roundtrip_cache[cache_key] = f"<unpicklable {type(v).__name__}: {v!r}>"
-        placeholder = roundtrip_cache[cache_key]
-        result[k] = v if placeholder is None else placeholder
+                roundtrip_cache[cache_key] = placeholder(v)
+        stand_in = roundtrip_cache[cache_key]
+        result[k] = v if stand_in is None else stand_in
     return result
+
+
+def _pickle_exception(exc: BaseException) -> bytes:
+    """
+    Pickle ``exc`` so that it loads again as an exception.
+
+    A dump that cannot be loaded later is worse than a stand-in, so verify the
+    exception survives loading (e.g. a custom ``__reduce__`` whose reconstruction
+    fails only at load time) and did not itself degrade to a placeholder.
+    """
+    with contextlib.suppress(Exception):
+        exc_pickle = resilient_dumps(exc)
+        if isinstance(pickle.loads(exc_pickle), BaseException):  # noqa: S301
+            return exc_pickle
+    return resilient_dumps(RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}"))
 
 
 def _serialize_exc_data(
@@ -120,16 +134,7 @@ def _serialize_exception(
         )
         curr_tb = curr_tb.tb_next
 
-    try:
-        exc_pickle = exception_safe_dumps(exc)
-        # A dump that cannot be loaded later is worse than a placeholder, so also
-        # verify the exception survives loading (e.g. a custom __reduce__ whose
-        # reconstruction fails only at load time).
-        pickle.loads(exc_pickle)  # noqa: S301
-    except Exception:  # noqa: BLE001
-        exc_pickle = exception_safe_dumps(
-            RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
-        )
+    exc_pickle = _pickle_exception(exc)
 
     if isinstance(exc, BaseExceptionGroup):
         return ExceptionGroupData(
@@ -153,9 +158,9 @@ def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> Exception
 
     if isinstance(file, Path):
         with file.open("wb") as f:
-            exception_safe_dump(data, f)
+            resilient_dump(data, f)
     elif isinstance(file, BytesIO):
-        exception_safe_dump(data, file)
+        resilient_dump(data, file)
     else:
         msg = f"Unexpected type for file {type(file).__name__}"
         raise TypeError(msg)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 import types
+from io import BytesIO
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -24,6 +26,16 @@ def func_to_module_string(func: Callable) -> str:
     lines = source.splitlines()
     body = "\n".join(lines[1:])
     return textwrap.dedent(body)
+
+
+class LockedError(Exception):
+    """Exception carrying an unpicklable lock both as an arg and as an attribute."""
+
+    def __init__(self, host: str, lock: threading.Lock) -> None:
+        """Keep the constructor arguments as state, like most exceptions do."""
+        super().__init__(host, lock)
+        self.host = host
+        self.lock = lock
 
 
 def get_frames(tb: types.TracebackType | None) -> list[types.FrameType]:
@@ -231,6 +243,27 @@ def test_unpicklable_exception_coverage(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unpicklable exception UnpicklableError: Unpicklable"):
         load_traceback(dump_file)
+
+
+def test_unpicklable_exception_state_becomes_placeholders() -> None:
+    """An exception with unpicklable state keeps its type and the rest of its state."""
+    buffer = BytesIO()
+
+    def raise_locked() -> Never:
+        raise LockedError("db1", threading.Lock())
+
+    try:
+        raise_locked()
+    except LockedError as e:
+        save_traceback(e, buffer)
+    buffer.seek(0)
+
+    loaded_exc = load_traceback(buffer, should_raise=False)
+    assert isinstance(loaded_exc, LockedError)
+    assert loaded_exc.host == "db1"
+    assert loaded_exc.args[0] == "db1"
+    assert loaded_exc.args[1] == loaded_exc.lock
+    assert str(loaded_exc.lock).startswith("<unpicklable lock: ")
 
 
 def test_save_traceback_file_none() -> None:

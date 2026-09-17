@@ -1,10 +1,13 @@
 """Save traceback to a file."""
 
+import dis
+import itertools
 import marshal
 import pickle
 import types
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from offline_debug._inner._pickle_helpers import exception_safe_dump, exception_safe_dumps
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
@@ -56,6 +59,30 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
         placeholder = roundtrip_cache[cache_key]
         result[k] = v if placeholder is None else placeholder
     return result
+
+
+def _module_snapshots(
+    code: types.CodeType, frame_globals: dict[str, Any], roundtrip_cache: dict[int, str | None]
+) -> dict[str, types.SimpleNamespace]:
+    """
+    Snapshot the attributes ``code`` reads from module globals.
+
+    Modules cannot be pickled, so ``constants.TIMEOUT`` would otherwise show only
+    a placeholder in the debugger. Each module read by attribute is replaced by a
+    namespace holding just the attributes this frame's code looks up on it.
+    """
+    attributes: dict[str, dict[str, Any]] = {}
+    for previous, instruction in itertools.pairwise(dis.get_instructions(code)):
+        if previous.opname not in ("LOAD_GLOBAL", "LOAD_NAME") or instruction.opname != "LOAD_ATTR":
+            continue
+        module = frame_globals.get(previous.argval)
+        if isinstance(module, types.ModuleType) and instruction.argval in vars(module):
+            value = vars(module)[instruction.argval]
+            attributes.setdefault(previous.argval, {})[instruction.argval] = value
+    return {
+        name: types.SimpleNamespace(**_filter_dict(values, roundtrip_cache))
+        for name, values in attributes.items()
+    }
 
 
 def _serialize_exc_data(
@@ -110,7 +137,8 @@ def _serialize_exception(
         tb_frames.append(
             FrameData(
                 code=marshal.dumps(f.f_code),
-                globals=_filter_dict(f.f_globals, roundtrip_cache),
+                globals=_filter_dict(f.f_globals, roundtrip_cache)
+                | _module_snapshots(f.f_code, f.f_globals, roundtrip_cache),
                 locals=_filter_dict(f.f_locals, roundtrip_cache),
                 lasti=curr_tb.tb_lasti,
                 lineno=curr_tb.tb_lineno,

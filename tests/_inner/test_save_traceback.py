@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import types
+from io import BytesIO
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -231,6 +233,28 @@ def test_unpicklable_exception_coverage(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unpicklable exception UnpicklableError: Unpicklable"):
         load_traceback(dump_file)
+
+
+def test_module_globals_are_snapshotted() -> None:
+    """Attributes a frame reads from a module global are captured, modules being unpicklable."""
+    buffer = BytesIO()
+
+    def raise_with_module_attributes() -> Never:
+        msg = f"pi is {math.pi}, tau is {math.tau}"
+        raise ValueError(msg)
+
+    try:
+        raise_with_module_attributes()
+    except ValueError as e:
+        save_traceback(e, buffer)
+    buffer.seek(0)
+
+    with pytest.raises(ValueError, match="pi is") as exc_info:
+        load_traceback(buffer)
+
+    frame_globals = get_frames(exc_info.tb)[-1].f_globals
+    assert frame_globals["math"] == types.SimpleNamespace(pi=math.pi, tau=math.tau)
+    assert frame_globals["types"].startswith("<unpicklable module: ")
 
 
 def test_save_traceback_file_none() -> None:

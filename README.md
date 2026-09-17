@@ -75,6 +75,8 @@ if isinstance(data, ExceptionGroupData):
     - `pickle` is used for exceptions and variables.
     - `marshal` is used for code objects.
     - Non-picklable items are gracefully handled by storing their `repr`.
+    - Modules are not picklable, so the attributes a frame reads from a module global
+      (e.g. `constants.TIMEOUT`) are snapshotted into a namespace under the module's name.
 
 ## Development & Tooling
 

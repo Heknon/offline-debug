@@ -14,8 +14,10 @@ exceptions look and feel genuine to debuggers and introspection tools.
 
 ## Core Functions
 
-- `save_traceback(exc: BaseException, file: Path | BytesIO)`:
+- `save_traceback(exc: BaseException, file: Path | BytesIO, *, max_value_bytes: int | None = None)`:
   Serializes an exception, its traceback, and all picklable local/global variables to a binary file or buffer.
+  `max_value_bytes` caps the pickled size of each variable; larger ones are stored as a placeholder with a
+  shortened repr, so a single large object cannot turn the dump into gigabytes.
 - `load_traceback(file: Path | BytesIO) -> Never`:
   Loads the serialized state, reconstructs the exception and its full traceback chain (including `__cause__` and `__context__`),
   and raises it.

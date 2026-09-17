@@ -2,6 +2,7 @@
 
 import marshal
 import pickle
+import reprlib
 import types
 from io import BytesIO
 from pathlib import Path
@@ -25,9 +26,14 @@ def _get_stack_depth(frame: types.FrameType) -> int:
     return depth
 
 
-def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
+def _filter_dict(
+    d: dict, roundtrip_cache: dict[int, str | None], max_value_bytes: int | None
+) -> dict:
     """
     Filter dictionary to include only items that survive a pickle round-trip.
+
+    Values whose pickle exceeds ``max_value_bytes`` are replaced by a placeholder
+    with a shortened repr, so one large variable cannot bloat the whole dump.
 
     ``roundtrip_cache`` maps ``id(value)`` to ``None`` (survives) or a placeholder
     string, so a value shared across frames (e.g. module globals) is only checked
@@ -48,8 +54,13 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
                 # Such values would otherwise break the entire load, so we replace
                 # them with a placeholder. We use the same pickler that serializes
                 # these dicts so the check reflects what will actually be written.
-                pickle.loads(exception_safe_dumps(v))  # noqa: S301
+                pickled = exception_safe_dumps(v)
+                pickle.loads(pickled)  # noqa: S301
                 roundtrip_cache[cache_key] = None
+                if max_value_bytes is not None and len(pickled) > max_value_bytes:
+                    roundtrip_cache[cache_key] = (
+                        f"<oversized {type(v).__name__}, {len(pickled)} bytes: {reprlib.repr(v)}>"
+                    )
             except BaseException:  # noqa: BLE001 - even a KeyboardInterrupt raised by a
                 # value's reconstruction must not abort capturing the traceback.
                 roundtrip_cache[cache_key] = f"<unpicklable {type(v).__name__}: {v!r}>"
@@ -59,7 +70,7 @@ def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
 
 
 def _serialize_exc_data(
-    exc: BaseException, roundtrip_cache: dict[int, str | None]
+    exc: BaseException, roundtrip_cache: dict[int, str | None], max_value_bytes: int | None
 ) -> ExceptionData:
     """Serialize an exception graph, preserving cycles and shared nodes."""
     memo: dict[int, ExceptionData] = {}
@@ -70,7 +81,7 @@ def _serialize_exc_data(
         if node is not None:
             return node
 
-        node = _serialize_exception(current, roundtrip_cache)
+        node = _serialize_exception(current, roundtrip_cache, max_value_bytes)
         memo[id(current)] = node
         pending.append(current)
         return node
@@ -90,7 +101,7 @@ def _serialize_exc_data(
 
 
 def _serialize_exception(
-    exc: BaseException, roundtrip_cache: dict[int, str | None]
+    exc: BaseException, roundtrip_cache: dict[int, str | None], max_value_bytes: int | None
 ) -> ExceptionData:
     """Serialize one exception without following graph edges."""
     tb_frames: list[FrameData] = []
@@ -110,8 +121,8 @@ def _serialize_exception(
         tb_frames.append(
             FrameData(
                 code=marshal.dumps(f.f_code),
-                globals=_filter_dict(f.f_globals, roundtrip_cache),
-                locals=_filter_dict(f.f_locals, roundtrip_cache),
+                globals=_filter_dict(f.f_globals, roundtrip_cache, max_value_bytes),
+                locals=_filter_dict(f.f_locals, roundtrip_cache, max_value_bytes),
                 lasti=curr_tb.tb_lasti,
                 lineno=curr_tb.tb_lineno,
                 stack_depth=_get_stack_depth(f),
@@ -145,9 +156,16 @@ def _serialize_exception(
     return ExceptionData(exc_pickle=exc_pickle, tb_frames=tb_frames)
 
 
-def save_traceback(exc: BaseException, file: Path | BytesIO | None) -> ExceptionData:
-    """Serialize an exception and its traceback to a file."""
-    data = _serialize_exc_data(exc, roundtrip_cache={})
+def save_traceback(
+    exc: BaseException, file: Path | BytesIO | None, *, max_value_bytes: int | None = None
+) -> ExceptionData:
+    """
+    Serialize an exception and its traceback to a file.
+
+    ``max_value_bytes`` caps the pickled size of each captured variable; larger
+    ones are stored as a placeholder with a shortened repr.
+    """
+    data = _serialize_exc_data(exc, roundtrip_cache={}, max_value_bytes=max_value_bytes)
     if file is None:
         return data
 

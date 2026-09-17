@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import types
+from io import BytesIO
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -231,6 +232,29 @@ def test_unpicklable_exception_coverage(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unpicklable exception UnpicklableError: Unpicklable"):
         load_traceback(dump_file)
+
+
+def test_oversized_values_become_placeholders() -> None:
+    """Variables whose pickle exceeds ``max_value_bytes`` are replaced by a shortened repr."""
+    buffer = BytesIO()
+
+    def raise_with_big_local() -> Never:
+        _big = list(range(100_000))
+        _small = 1
+        msg = "big"
+        raise ValueError(msg)
+
+    try:
+        raise_with_big_local()
+    except ValueError as e:
+        save_traceback(e, buffer, max_value_bytes=1024)
+    buffer.seek(0)
+
+    loaded_exc = load_traceback(buffer, should_raise=False)
+    frame_locals = get_frames(loaded_exc.__traceback__)[-1].f_locals
+    assert frame_locals["_small"] == 1
+    assert frame_locals["_big"].startswith("<oversized list, ")
+    assert frame_locals["_big"].endswith(": [0, 1, 2, 3, 4, 5, ...]>")
 
 
 def test_save_traceback_file_none() -> None:

@@ -37,7 +37,7 @@ import contextlib
 import io
 import pickle
 import types
-from typing import IO, Any
+from typing import IO, Any, Self
 
 # Pickle protocol hooks that let a class control its own serialization.
 # If an exception class customizes any of these, we must not override its
@@ -142,3 +142,49 @@ def exception_safe_dumps(obj: object) -> bytes:
     buf = io.BytesIO()
     exception_safe_dump(obj, buf)
     return buf.getvalue()
+
+
+class MissingObject:
+    """
+    Stand-in for a pickled object whose class or reconstructor cannot be imported here.
+
+    :class:`TolerantUnpickler` creates a subclass per missing ``module.name`` and
+    the dump uses it however it used the original: calling it keeps the arguments,
+    and any state pickled afterwards becomes attributes.
+    """
+
+    args: tuple[Any, ...]
+
+    def __new__(cls, *args: Any) -> Self:  # noqa: ANN401
+        """Keep the arguments the dump called the missing name with."""
+        self = super().__new__(cls)
+        self.args = args
+        return self
+
+    def __setstate__(self, state: object) -> None:
+        """Apply pickled state as attributes; keep non-dict state (e.g. slots) as one."""
+        self.__dict__.update(state if isinstance(state, dict) else {"state": state})
+
+    def __repr__(self) -> str:
+        """Show which name is missing and how the dump called it."""
+        return f"<missing {type(self).__module__}.{type(self).__qualname__}{self.args!r}>"
+
+
+class TolerantUnpickler(pickle.Unpickler):
+    """Unpickler that stands in :class:`MissingObject` for names it cannot import."""
+
+    def find_class(self, module: str, name: str, /) -> Any:  # noqa: ANN401
+        try:
+            return super().find_class(module, name)
+        except (ImportError, AttributeError):
+            return type(name, (MissingObject,), {"__module__": module, "__qualname__": name})
+
+
+def tolerant_load(file: IO[bytes]) -> Any:  # noqa: ANN401
+    """Deserialize from an open binary ``file`` using :class:`TolerantUnpickler`."""
+    return TolerantUnpickler(file).load()
+
+
+def tolerant_loads(data: bytes) -> Any:  # noqa: ANN401
+    """Deserialize ``data`` using :class:`TolerantUnpickler`."""
+    return tolerant_load(io.BytesIO(data))

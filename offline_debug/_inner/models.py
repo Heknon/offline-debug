@@ -7,10 +7,20 @@ from typing import Any
 
 
 @dataclass
+class CodeData:
+    """The metadata of a frame's code object that a reconstructed frame carries."""
+
+    filename: str
+    name: str
+    qualname: str
+    firstlineno: int
+
+
+@dataclass
 class FrameData:
     """Serialized data for a single stack frame."""
 
-    code: bytes
+    code: CodeData
     globals: dict[str, Any]
     locals: dict[str, Any]
     lasti: int

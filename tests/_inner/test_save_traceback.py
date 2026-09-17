@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Never
 
 import pytest
 
-from offline_debug import ExceptionData, load_traceback, save_traceback
+from offline_debug import CodeData, ExceptionData, load_traceback, save_traceback
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -231,6 +231,26 @@ def test_unpicklable_exception_coverage(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unpicklable exception UnpicklableError: Unpicklable"):
         load_traceback(dump_file)
+
+
+def test_frames_store_code_metadata() -> None:
+    """Only the code metadata a frame needs is stored, none of the interpreter's bytecode."""
+
+    def raise_here() -> Never:
+        msg = "here"
+        raise ValueError(msg)
+
+    try:
+        raise_here()
+    except ValueError as e:
+        data = save_traceback(e, None)
+
+    assert data.tb_frames[-1].code == CodeData(
+        filename=__file__,
+        name="raise_here",
+        qualname=f"{test_frames_store_code_metadata.__qualname__}.<locals>.raise_here",
+        firstlineno=raise_here.__code__.co_firstlineno,
+    )
 
 
 def test_save_traceback_file_none() -> None:

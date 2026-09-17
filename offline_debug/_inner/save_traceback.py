@@ -1,12 +1,18 @@
 """Save traceback to a file."""
 
+import contextlib
 import marshal
 import pickle
 import types
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
-from offline_debug._inner._pickle_helpers import exception_safe_dump, exception_safe_dumps
+from offline_debug._inner._pickle_helpers import (
+    exception_safe_dump,
+    exception_safe_dumps,
+    reconstruct_exception,
+)
 from offline_debug._inner.models import ExceptionData, ExceptionGroupData, FrameData
 
 # Internal attributes that are either unpicklable or redundant in a new process.
@@ -25,37 +31,70 @@ def _get_stack_depth(frame: types.FrameType) -> int:
     return depth
 
 
-def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
+def _verified_dumps(obj: object) -> bytes:
     """
-    Filter dictionary to include only items that survive a pickle round-trip.
+    Pickle ``obj`` and verify the result loads again.
 
-    ``roundtrip_cache`` maps ``id(value)`` to ``None`` (survives) or a placeholder
-    string, so a value shared across frames (e.g. module globals) is only checked
-    once per save. The cached objects stay alive for the whole save because the
-    frames still reference them, so the ids are stable.
+    Some values pickle but fail to unpickle (e.g. a custom ``__reduce__`` whose
+    callable raises on load), which would otherwise break the entire load.
     """
-    result = {}
-    for k, v in d.items():
-        if k in _INTERNAL_ATTRIBUTES_TO_SKIP:
-            continue
-        cache_key = id(v)
-        if cache_key not in roundtrip_cache:
-            try:
-                # We must verify that the value survives a full pickle round-trip
-                # because many globals (like open file handles, database connections,
-                # or modules) cannot be saved to disk, and some values pickle but fail
-                # to unpickle (e.g. a custom __reduce__ whose callable raises on load).
-                # Such values would otherwise break the entire load, so we replace
-                # them with a placeholder. We use the same pickler that serializes
-                # these dicts so the check reflects what will actually be written.
-                pickle.loads(exception_safe_dumps(v))  # noqa: S301
-                roundtrip_cache[cache_key] = None
-            except BaseException:  # noqa: BLE001 - even a KeyboardInterrupt raised by a
-                # value's reconstruction must not abort capturing the traceback.
-                roundtrip_cache[cache_key] = f"<unpicklable {type(v).__name__}: {v!r}>"
-        placeholder = roundtrip_cache[cache_key]
-        result[k] = v if placeholder is None else placeholder
-    return result
+    data = exception_safe_dumps(obj)
+    pickle.loads(data)  # noqa: S301
+    return data
+
+
+def _picklable(value: Any, roundtrip_cache: dict[int, str | None]) -> Any:  # noqa: ANN401
+    """
+    Return ``value`` if it survives a pickle round-trip, else a placeholder string.
+
+    Many values (open file handles, database connections, modules) cannot be
+    saved to disk. ``roundtrip_cache`` maps ``id(value)`` to ``None`` (survives)
+    or its placeholder, so a value shared across frames (e.g. module globals) is
+    only checked once per save. The cached objects stay alive for the whole save
+    because the frames still reference them, so the ids are stable.
+    """
+    cache_key = id(value)
+    if cache_key not in roundtrip_cache:
+        try:
+            _verified_dumps(value)
+            roundtrip_cache[cache_key] = None
+        except BaseException:  # noqa: BLE001 - even a KeyboardInterrupt raised by a
+            # value's reconstruction must not abort capturing the traceback.
+            roundtrip_cache[cache_key] = f"<unpicklable {type(value).__name__}: {value!r}>"
+    placeholder = roundtrip_cache[cache_key]
+    return value if placeholder is None else placeholder
+
+
+def _filter_dict(d: dict, roundtrip_cache: dict[int, str | None]) -> dict:
+    """Copy ``d`` with unpicklable values replaced by placeholders."""
+    return {
+        k: _picklable(v, roundtrip_cache)
+        for k, v in d.items()
+        if k not in _INTERNAL_ATTRIBUTES_TO_SKIP
+    }
+
+
+def _pickle_exception(exc: BaseException, roundtrip_cache: dict[int, str | None]) -> bytes:
+    """
+    Pickle ``exc`` so that it loads again.
+
+    When the exception itself cannot round-trip, retry with a copy whose
+    unpicklable args and attributes are replaced by placeholders, so its type
+    and the rest of its state survive. Only if that fails too is the whole
+    exception replaced by a ``RuntimeError`` describing it.
+    """
+    with contextlib.suppress(Exception):
+        return _verified_dumps(exc)
+    with contextlib.suppress(Exception):
+        degraded = reconstruct_exception(
+            type(exc),
+            tuple(_picklable(arg, roundtrip_cache) for arg in exc.args),
+            _filter_dict(vars(exc), roundtrip_cache) or None,
+        )
+        return _verified_dumps(degraded)
+    return exception_safe_dumps(
+        RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
+    )
 
 
 def _serialize_exc_data(
@@ -120,16 +159,7 @@ def _serialize_exception(
         )
         curr_tb = curr_tb.tb_next
 
-    try:
-        exc_pickle = exception_safe_dumps(exc)
-        # A dump that cannot be loaded later is worse than a placeholder, so also
-        # verify the exception survives loading (e.g. a custom __reduce__ whose
-        # reconstruction fails only at load time).
-        pickle.loads(exc_pickle)  # noqa: S301
-    except Exception:  # noqa: BLE001
-        exc_pickle = exception_safe_dumps(
-            RuntimeError(f"Unpicklable exception {type(exc).__name__}: {exc!s}")
-        )
+    exc_pickle = _pickle_exception(exc, roundtrip_cache)
 
     if isinstance(exc, BaseExceptionGroup):
         return ExceptionGroupData(

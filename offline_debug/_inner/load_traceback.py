@@ -1,12 +1,15 @@
 """Load traceback object from a dump file."""
 
-import pickle
 import sys
 import types
 from io import BytesIO
 from pathlib import Path
 
-from offline_debug._inner._pickle_helpers import reconstruct_exception_group
+from offline_debug._inner._pickle_helpers import (
+    reconstruct_exception_group,
+    tolerant_load,
+    tolerant_loads,
+)
 from offline_debug._inner.c_api import (
     create_frame,
     link_frame,
@@ -102,7 +105,7 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
         if existing is not None:
             return existing
 
-        exc = pickle.loads(node.exc_pickle)  # noqa: S301
+        exc = tolerant_loads(node.exc_pickle)
         if not isinstance(exc, BaseException):
             msg = f"Expected BaseException, but got {type(exc).__name__}"
             raise TypeError(msg)
@@ -134,9 +137,9 @@ def _reconstruct_exc_data(data: ExceptionData) -> BaseException:
 def parse_traceback(file: Path | BytesIO) -> ExceptionData:
     if isinstance(file, Path):
         with file.open("rb") as f:
-            data = pickle.load(f)  # noqa: S301
+            data = tolerant_load(f)
     else:
-        data = pickle.load(file)  # noqa: S301
+        data = tolerant_load(file)
 
     if not isinstance(data, ExceptionData):
         msg = f"Expected _ExceptionData, but got {type(data).__name__}"

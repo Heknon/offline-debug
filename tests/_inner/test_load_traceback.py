@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,6 +13,18 @@ from offline_debug import load_traceback, save_traceback
 
 if TYPE_CHECKING:
     import types
+
+
+class Vanished:
+    """Class removed from this module before loading, like one that moved between versions."""
+
+    def __init__(self, value: int) -> None:
+        """Keep ``value`` as both a constructor argument and pickled state."""
+        self.value = value
+
+    def __reduce__(self) -> tuple:
+        """Pickle as a call with arguments followed by state."""
+        return Vanished, (self.value,), {"value": self.value}
 
 
 def get_frames(tb: types.TracebackType | None) -> list[types.FrameType]:
@@ -97,3 +110,25 @@ def test_load_traceback_should_raise_false() -> None:
     loaded_exc = load_traceback(buffer, should_raise=False)
     assert isinstance(loaded_exc, ValueError)
     assert str(loaded_exc) == "test_raise_false"
+
+
+def test_missing_class_loads_as_stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value whose class cannot be imported must not make the whole dump unloadable."""
+    buffer = BytesIO()
+
+    def raise_with_vanished() -> None:
+        _vanished = Vanished(1)
+        msg = "vanished"
+        raise ValueError(msg)
+
+    try:
+        raise_with_vanished()
+    except ValueError as e:
+        save_traceback(e, buffer)
+    buffer.seek(0)
+    monkeypatch.delattr(sys.modules[__name__], "Vanished")
+
+    loaded_exc = load_traceback(buffer, should_raise=False)
+    stand_in = get_frames(loaded_exc.__traceback__)[-1].f_locals["_vanished"]
+    assert repr(stand_in) == f"<missing {__name__}.Vanished(1,)>"
+    assert stand_in.value == 1

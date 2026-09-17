@@ -76,6 +76,9 @@ if isinstance(data, ExceptionGroupData):
     - Only the code metadata a frame needs (file name, name, qualified name, first line) is stored,
       so dumps carry nothing specific to the interpreter that wrote them.
     - Non-picklable items are gracefully handled by storing their `repr`.
+    - A value whose class cannot be imported where the dump is loaded (a class that moved between
+      Python versions, or one from the crashing script's `__main__`) loads as a stand-in carrying its
+      pickled arguments and attributes instead of failing the whole load.
 
 ## Development & Tooling
 

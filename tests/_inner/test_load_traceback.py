@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -101,3 +102,23 @@ def test_load_traceback_should_raise_false() -> None:
     loaded_exc = load_traceback(buffer, should_raise=False)
     assert isinstance(loaded_exc, ValueError)
     assert str(loaded_exc) == "test_raise_false"
+
+
+def test_loaded_traceback_is_formattable() -> None:
+    """The ``traceback`` module must format reconstructed frames from ``tb_lineno``."""
+    buffer = BytesIO()
+
+    def raise_late() -> None:
+        msg = "late"
+        raise ValueError(msg)
+
+    try:
+        raise_late()
+    except ValueError as e:
+        save_traceback(e, buffer)
+    buffer.seek(0)
+
+    loaded_exc = load_traceback(buffer, should_raise=False)
+    formatted = "".join(traceback.format_exception(loaded_exc))
+    assert "in raise_late\n    raise ValueError(msg)\n" in formatted
+    assert formatted.endswith("ValueError: late\n")

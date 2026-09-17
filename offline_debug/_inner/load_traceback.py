@@ -69,10 +69,13 @@ def _reconstruct_traceback(data: ExceptionData) -> types.TracebackType | None:
 
     tb_next: types.TracebackType | None = None
     for frame, f_data in reversed(reconstructed_frames):
+        # The frame runs the empty stand-in code above, so the original instruction
+        # offset points past its position table and would make ``traceback``
+        # formatting fail. -1 makes formatters fall back to ``tb_lineno`` instead.
         tb = types.TracebackType(
             tb_next=tb_next,
             tb_frame=frame,
-            tb_lasti=f_data.lasti,
+            tb_lasti=-1,
             tb_lineno=f_data.lineno,
         )
         tb_next = tb

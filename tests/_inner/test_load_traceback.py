@@ -62,22 +62,18 @@ def test_reconstruct_invalid_frame_type(monkeypatch) -> None:
     """Test that _reconstruct_exc_data raises TypeError when frame creation fails."""
     import offline_debug._inner.c_api._create_frame as _create_frame_module
     from offline_debug._inner.load_traceback import _reconstruct_exc_data
-    from offline_debug._inner.models import ExceptionData, FrameData
+    from offline_debug._inner.models import CodeData, ExceptionData, FrameData
 
     # Mock _get_py_frame_new to return a function that returns something that is not a FrameType
     monkeypatch.setattr(_create_frame_module, "_get_py_frame_new", lambda: lambda *_: "not a frame")
 
-    import marshal
     import pickle
-
-    def dummy() -> None:
-        pass
 
     data = ExceptionData(
         exc_pickle=pickle.dumps(ValueError("test")),
         tb_frames=[
             FrameData(
-                code=marshal.dumps(dummy.__code__),
+                code=CodeData(filename="dummy.py", name="dummy", qualname="dummy", firstlineno=1),
                 globals={},
                 locals={},
                 lasti=0,

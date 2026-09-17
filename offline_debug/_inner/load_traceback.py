@@ -1,12 +1,10 @@
 """Load traceback object from a dump file."""
 
-import marshal
 import pickle
 import sys
 import types
 from io import BytesIO
 from pathlib import Path
-from types import CodeType
 
 from offline_debug._inner._pickle_helpers import reconstruct_exception_group
 from offline_debug._inner.c_api import (
@@ -35,22 +33,19 @@ def _reconstruct_traceback(data: ExceptionData) -> types.TracebackType | None:
     """
     reconstructed_frames: list[tuple[types.FrameType, FrameData]] = []
     for f_data in data.tb_frames:
-        code: CodeType = marshal.loads(f_data.code)  # noqa: S302
-
         # In Python 3.11+, accessing f_locals on a frame created via
         # PyFrame_New for optimized code (functions) causes a segmentation fault
         # because the internal 'fast' locals array is not initialized.
-        # As a workaround, we create a 'non-optimized' version of the code object
-        # by compiling a dummy string. This ensures the bytecode is safe
-        # (no LOAD_FAST) while preserving metadata like name and filename.
+        # As a workaround, we create a 'non-optimized' code object by compiling
+        # an empty string. This ensures the bytecode is safe (no LOAD_FAST)
+        # while carrying the original metadata like name and filename.
         # A simple module-level code object never has fast locals.
         # Since the source is empty, no optimized locals will be created.
         # Instead, python will go to the unoptimized dictionary we set under frame_locals later.
-        unoptimized_code = compile("", code.co_filename, "exec")
-        code = unoptimized_code.replace(
-            co_name=code.co_name,
-            co_firstlineno=code.co_firstlineno,
-            co_qualname=code.co_qualname,
+        code = compile("", f_data.code.filename, "exec").replace(
+            co_name=f_data.code.name,
+            co_firstlineno=f_data.code.firstlineno,
+            co_qualname=f_data.code.qualname,
         )
 
         # PyFrame_New returns a new reference to a PyFrameObject.
